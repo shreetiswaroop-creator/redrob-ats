@@ -1,11 +1,11 @@
 import { CountItem } from "@/lib/dashboardMetrics";
+import { ColorSlot } from "@/lib/chartColors";
 
 // Horizontal bar chart, plain HTML/CSS (percentage-width bars) — no SVG
 // needed for this form. Bars are capped at 24px thick per the mark spec,
 // square at the baseline (left) and rounded at the data end (right), and
 // every bar is direct-labeled with its value so no tooltip is required to
-// read the chart. `colorFor` takes the same fill-* classes as DonutChart's,
-// for a single source of truth per color — converted to bg-* here.
+// read the chart.
 export function BarChart({
   items,
   colorFor,
@@ -14,7 +14,7 @@ export function BarChart({
   formatValue,
 }: {
   items: CountItem[];
-  colorFor: (item: CountItem, index: number) => string;
+  colorFor: (item: CountItem, index: number) => ColorSlot;
   title: string;
   subtitle?: string;
   formatValue?: (item: CountItem) => string;
@@ -33,7 +33,7 @@ export function BarChart({
             </div>
             <div className="relative h-6 min-w-0 flex-1 border-l border-slate-200 dark:border-slate-700">
               <div
-                className={`h-6 rounded-r-[4px] ${colorFor(item, i).replaceAll("fill-", "bg-")}`}
+                className={`h-6 rounded-r-[4px] ${colorFor(item, i).bg}`}
                 style={{ width: `${(item.count / max) * 100}%` }}
               />
             </div>

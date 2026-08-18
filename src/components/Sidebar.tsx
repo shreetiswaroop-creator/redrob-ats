@@ -17,6 +17,17 @@ function PipelineIcon() {
   );
 }
 
+function UserPlusIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+      <circle cx="7" cy="5.5" r="2.5" />
+      <path d="M1.5 15.5c0-2.8 2.5-5 5.5-5s5.5 2.2 5.5 5" />
+      <path d="M14 5.5v4" />
+      <path d="M12 7.5h4" />
+    </svg>
+  );
+}
+
 function DashboardIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -37,22 +48,79 @@ function BellIcon() {
   );
 }
 
-function PeopleIcon() {
+function CalendarIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-      <circle cx="6.5" cy="5.5" r="2.5" />
-      <path d="M1.5 15.5c0-2.8 2.2-5 5-5s5 2.2 5 5" />
-      <circle cx="13" cy="5.8" r="2" />
-      <path d="M11.8 10.7c2.3.3 4.2 2.3 4.2 4.8" />
+      <rect x="1.5" y="3" width="15" height="13" rx="1.5" />
+      <path d="M1.5 7h15" />
+      <path d="M5 1.5v3" />
+      <path d="M13 1.5v3" />
+    </svg>
+  );
+}
+
+function ArchiveIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="1.5" y="2" width="15" height="4" rx="1" />
+      <path d="M2.5 6v8.5a1.5 1.5 0 0 0 1.5 1.5h9a1.5 1.5 0 0 0 1.5-1.5V6" />
+      <path d="M7 9.5h4" />
+    </svg>
+  );
+}
+
+function TargetIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6">
+      <circle cx="9" cy="9" r="7" />
+      <circle cx="9" cy="9" r="4" />
+      <circle cx="9" cy="9" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function ScaleIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 2v14" />
+      <path d="M4.5 4.5h9" />
+      <path d="M2 4.5l2.5 5h-5z" />
+      <path d="M13.5 4.5l2.5 5h-5z" />
+      <path d="M6 16h6" />
+    </svg>
+  );
+}
+
+function DocumentTemplatesIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4.5 1.5h6l3 3v11a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1Z" />
+      <path d="M10.5 1.5v3h3" />
+      <path d="M6 9.5h6M6 12h6M6 7h3" />
+    </svg>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="9" cy="9" r="2.5" />
+      <path d="M9 1.8v2.1M9 14.1v2.1M16.2 9h-2.1M3.9 9H1.8M14.1 3.9l-1.5 1.5M5.4 12.6l-1.5 1.5M14.1 14.1l-1.5-1.5M5.4 5.4L3.9 3.9" />
     </svg>
   );
 }
 
 const NAV_ITEMS: { href: string; label: string; icon: () => React.JSX.Element; roles: UserRole[] | null }[] = [
-  { href: "/", label: "Candidate Pipeline", icon: PipelineIcon, roles: null },
-  { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, roles: null },
+  { href: "/", label: "Dashboard", icon: DashboardIcon, roles: null },
+  { href: "/pipeline", label: "Candidate Pipeline", icon: PipelineIcon, roles: null },
+  { href: "/candidates", label: "Candidates", icon: UserPlusIcon, roles: null },
+  { href: "/interviews", label: "Interviews", icon: CalendarIcon, roles: null },
+  { href: "/archive", label: "Archive", icon: ArchiveIcon, roles: null },
   { href: "/notifications", label: "Notifications log", icon: BellIcon, roles: null },
-  { href: "/accounts", label: "Accounts", icon: PeopleIcon, roles: ["hr_management"] },
+  { href: "/my-performance", label: "My Performance", icon: TargetIcon, roles: null },
+  { href: "/recruiter-comparison", label: "Recruiter Comparison", icon: ScaleIcon, roles: ["hr_management"] },
+  { href: "/document-templates", label: "Document Templates", icon: DocumentTemplatesIcon, roles: ["hr_management"] },
+  { href: "/settings", label: "Settings", icon: SettingsIcon, roles: ["hr_management"] },
 ];
 
 export function Sidebar() {
@@ -62,7 +130,8 @@ export function Sidebar() {
   return (
     <aside className="flex h-screen w-60 shrink-0 flex-col border-r border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
       <div className="border-b border-slate-100 px-4 py-4 dark:border-slate-700">
-        <RedrobLogo />
+        <RedrobLogo size="lg" />
+        <p className="mt-1.5 text-xs font-medium text-slate-400 dark:text-slate-500">Applicant Tracking System</p>
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-3">

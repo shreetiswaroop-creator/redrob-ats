@@ -9,7 +9,11 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/api/login") ||
     pathname.startsWith("/api/cron/") ||
     pathname.startsWith("/_next") ||
-    pathname.startsWith("/favicon")
+    pathname.startsWith("/favicon") ||
+    pathname === "/redrob-logo.png" ||
+    // GET is intentionally public here (see src/app/api/org-settings/logo/route.ts)
+    // — RedrobLogo renders on the login page, before anyone has a session.
+    (pathname === "/api/org-settings/logo" && req.method === "GET")
   ) {
     return NextResponse.next();
   }

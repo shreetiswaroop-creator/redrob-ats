@@ -1,16 +1,38 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useActor } from "@/lib/actor-context";
 import { ChangePasswordModal } from "./ChangePasswordModal";
-import { ThemeToggle } from "./ThemeToggle";
 
 export function ActorBar() {
   const { user } = useActor();
   const router = useRouter();
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [gmailStatus, setGmailStatus] = useState<{ connected: boolean; email: string | null } | null>(null);
+  const [disconnecting, setDisconnecting] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/me/gmail-status")
+      .then((r) => r.json())
+      .then(setGmailStatus)
+      .catch(() => {});
+  }, []);
+
+  async function handleDisconnectGmail() {
+    setDisconnecting(true);
+    try {
+      await fetch("/api/auth/google/disconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: "personal" }),
+      });
+      setGmailStatus({ connected: false, email: null });
+    } finally {
+      setDisconnecting(false);
+    }
+  }
 
   async function handleLogout() {
     setLoggingOut(true);
@@ -34,8 +56,26 @@ export function ActorBar() {
         <button onClick={handleLogout} disabled={loggingOut} className="underline hover:text-slate-700 dark:hover:text-slate-200">
           {loggingOut ? "Logging out…" : "Log out"}
         </button>
-        <ThemeToggle />
       </div>
+
+      {gmailStatus && (
+        <div className="border-t border-slate-100 pt-2 dark:border-slate-700">
+          {gmailStatus.connected ? (
+            <>
+              <p className="truncate text-emerald-600 dark:text-emerald-400" title={gmailStatus.email ?? undefined}>
+                ✓ Gmail &amp; Calendar connected
+              </p>
+              <button onClick={handleDisconnectGmail} disabled={disconnecting} className="underline hover:text-slate-700 dark:hover:text-slate-200">
+                {disconnecting ? "Disconnecting…" : "Disconnect"}
+              </button>
+            </>
+          ) : (
+            <a href="/api/auth/google/connect?target=personal" className="underline hover:text-slate-700 dark:hover:text-slate-200">
+              Connect Gmail &amp; Calendar
+            </a>
+          )}
+        </div>
+      )}
 
       {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
     </div>

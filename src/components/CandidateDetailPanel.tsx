@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Modal, Field, inputClass } from "./Modal";
 import { RejectModal } from "./RejectModal";
 import { OnHoldModal } from "./OnHoldModal";
+import { InterviewClearedModal } from "./InterviewClearedModal";
 import {
   Candidate,
   PendingEmailInfo,
@@ -18,21 +19,82 @@ import {
   ReferenceRecord,
   InterviewRound,
   OfferStep,
-  DocumentRecord,
   OfferDocumentApproval,
+  HRMS_HANDOVER_STATUS_LABELS,
+  AuditLogEntry,
+  CandidateNote,
+  CustomFieldDefinition,
 } from "@/lib/types";
 import { api } from "@/lib/api";
 import { computeStepTatStatus, effectiveTatHours, pendingGraceExtension } from "@/lib/tat";
+import { CustomFieldsFields } from "./CustomFieldsFields";
 
 function newId() {
   return typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Math.random());
 }
 
-function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
+// datetime-local inputs need "YYYY-MM-DDTHH:mm" in local time — toISOString()
+// would silently shift the displayed time by the browser's UTC offset.
+function toDatetimeLocalValue(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Mirrors InterviewsView's formatScheduledRange — same fixed locale so the
+// candidate's card shows the same start–end window as the Interviews list,
+// not just the raw start time the datetime-local input above holds.
+function formatRoundWindow(startIso: string, durationMinutes: number): string {
+  const start = new Date(startIso);
+  const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
+  const startStr = start.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
+  const endStr = end.toLocaleTimeString("en-US", { timeStyle: "short" });
+  return `${startStr} – ${endStr}`;
+}
+
+function SectionCard({
+  title,
+  children,
+  collapsible = false,
+  defaultOpen = true,
+}: {
+  title: string;
+  children: React.ReactNode;
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const isOpen = !collapsible || open;
+
   return (
     <div className="mb-4 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
-      <h3 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-200">{title}</h3>
-      {children}
+      {collapsible ? (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-center justify-between text-left"
+        >
+          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">{title}</h3>
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={`shrink-0 text-slate-400 transition-transform dark:text-slate-500 ${isOpen ? "rotate-180" : ""}`}
+          >
+            <path d="M3 5.5l4 4 4-4" />
+          </svg>
+        </button>
+      ) : (
+        <h3 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-200">{title}</h3>
+      )}
+      {isOpen && <div className={collapsible ? "mt-3" : ""}>{children}</div>}
     </div>
   );
 }
@@ -55,10 +117,12 @@ export function CandidateDetailPanel({
   pendingEmail,
   onClose,
   onUpdated,
+  customFieldDefinitions,
 }: {
   candidate: Candidate;
   requisition: Requisition | undefined;
   pendingEmail?: PendingEmailInfo | null;
+  customFieldDefinitions: CustomFieldDefinition[];
   onClose: () => void;
   onUpdated: (c: Candidate) => void;
 }) {
@@ -66,6 +130,7 @@ export function CandidateDetailPanel({
   const [showReject, setShowReject] = useState(false);
   const [showOnHold, setShowOnHold] = useState(false);
   const [correctionStage, setCorrectionStage] = useState<Stage>(candidate.current_stage);
+  const [clearedRound, setClearedRound] = useState<InterviewRound | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function saveFields(fields: Record<string, unknown>) {
@@ -83,6 +148,45 @@ export function CandidateDetailPanel({
 
   async function handleReject(reason: string) {
     const updated = await api.rejectCandidate(candidate.id, reason);
+    setCandidate(updated);
+    onUpdated(updated);
+  }
+
+  // An interview round's outcome drives what happens next: "rejected" moves
+  // the candidate straight to the Rejected column (no separate prompt —
+  // that's already a considered decision by the time it's saved here);
+  // "cleared" asks whether they're selected for the final decision or need
+  // another round, since either is a legitimate next step.
+  async function handleSaveInterviewRounds(rounds: InterviewRound[]) {
+    const previousOutcomeByName = new Map(candidate.interview_rounds.map((r) => [r.round_name, r.outcome]));
+    const updated = await saveFields({ interview_rounds: rounds });
+    if (!updated || updated.status !== "active") return updated;
+
+    const newlyRejected = rounds.find((r) => r.outcome === "rejected" && previousOutcomeByName.get(r.round_name) !== "rejected");
+    if (newlyRejected) {
+      const reason = newlyRejected.notes?.trim()
+        ? `Interview round "${newlyRejected.round_name}" — ${newlyRejected.notes.trim()}`
+        : `Did not clear interview round: ${newlyRejected.round_name}`;
+      await handleReject(reason);
+      return updated;
+    }
+
+    const newlyCleared = rounds.find((r) => r.outcome === "cleared" && previousOutcomeByName.get(r.round_name) !== "cleared");
+    if (newlyCleared && updated.current_stage === "interview") {
+      setClearedRound(newlyCleared);
+    }
+    return updated;
+  }
+
+  async function handleMoveToSelected() {
+    const updated = await api.moveCandidateStage(candidate.id, "selected_awaiting_final_details");
+    setCandidate(updated);
+    onUpdated(updated);
+  }
+
+  async function handleNeedsAnotherRound() {
+    if (!clearedRound) return;
+    const updated = await api.notifyNextRound(candidate.id, clearedRound.round_name);
     setCandidate(updated);
     onUpdated(updated);
   }
@@ -392,7 +496,29 @@ export function CandidateDetailPanel({
                 onBlur={(e) => e.target.value !== candidate.expected_ctc && saveFields({ expected_ctc: e.target.value })}
               />
             </Field>
+            <Field label="LinkedIn URL">
+              <input
+                className={inputClass}
+                defaultValue={candidate.linkedin_url ?? ""}
+                onBlur={(e) => e.target.value !== candidate.linkedin_url && saveFields({ linkedin_url: e.target.value })}
+              />
+            </Field>
+            <Field label="Portfolio URL">
+              <input
+                className={inputClass}
+                defaultValue={candidate.portfolio_url ?? ""}
+                onBlur={(e) => e.target.value !== candidate.portfolio_url && saveFields({ portfolio_url: e.target.value })}
+              />
+            </Field>
           </div>
+          <Field label="Reason for change">
+            <textarea
+              className={inputClass}
+              rows={2}
+              defaultValue={candidate.reason_for_change ?? ""}
+              onBlur={(e) => e.target.value !== candidate.reason_for_change && saveFields({ reason_for_change: e.target.value })}
+            />
+          </Field>
           <Field label="Notes">
             <textarea
               className={inputClass}
@@ -403,11 +529,25 @@ export function CandidateDetailPanel({
           </Field>
         </SectionCard>
 
+        <CustomFieldsFields
+          definitions={customFieldDefinitions}
+          values={candidate.custom_fields ?? {}}
+          onChange={(next) => saveFields({ custom_fields: next })}
+        />
+
+        <PhotoSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
+
         <ResumeSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
 
-        <InterviewRoundsSection candidate={candidate} onSave={(rounds) => saveFields({ interview_rounds: rounds })} />
+        <InterviewRoundsSection candidate={candidate} onSave={handleSaveInterviewRounds} />
 
         <FinalDetailsSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
+
+        <OfferStepsSection
+          candidate={candidate}
+          onSave={(steps) => saveFields({ offer_steps: steps })}
+          setCandidate={(c) => { setCandidate(c); onUpdated(c); }}
+        />
 
         <EmploymentHistorySection candidate={candidate} onSave={(rows) => saveFields({ employment_history: rows })} />
 
@@ -418,17 +558,15 @@ export function CandidateDetailPanel({
           setCandidate={(c) => { setCandidate(c); onUpdated(c); }}
         />
 
-        <OfferStepsSection
-          candidate={candidate}
-          onSave={(steps) => saveFields({ offer_steps: steps })}
-          setCandidate={(c) => { setCandidate(c); onUpdated(c); }}
-        />
-
-        <DocumentsSection candidate={candidate} onSave={(docs) => saveFields({ documents: docs })} />
-
         <ApprovalsSection candidate={candidate} onSave={(approvals) => saveFields({ offer_document_approvals: approvals })} />
 
-        <SectionCard title="Activity / audit log">
+        <EmployeeAgreementPdfSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
+
+        <HrmsHandoverSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
+
+        <TimelineSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
+
+        <SectionCard title="Activity / audit log" collapsible defaultOpen={false}>
           <ul className="space-y-1 text-xs text-slate-600 dark:text-slate-400">
             {[...candidate.audit_log].reverse().map((entry, i) => (
               <li key={i}>
@@ -467,7 +605,86 @@ export function CandidateDetailPanel({
       {showOnHold && (
         <OnHoldModal candidateName={candidate.name} onClose={() => setShowOnHold(false)} onConfirm={handleSetOnHold} />
       )}
+      {clearedRound && (
+        <InterviewClearedModal
+          candidateName={candidate.name}
+          roundName={clearedRound.round_name}
+          onClose={() => setClearedRound(null)}
+          onMoveToSelected={handleMoveToSelected}
+          onNeedsAnotherRound={handleNeedsAnotherRound}
+        />
+      )}
     </Modal>
+  );
+}
+
+function PhotoSection({
+  candidate,
+  setCandidate,
+}: {
+  candidate: Candidate;
+  setCandidate: (c: Candidate) => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setError(null);
+    setUploading(true);
+    try {
+      const updated = await api.uploadPhoto(candidate.id, file);
+      setCandidate(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleRemove() {
+    setError(null);
+    try {
+      const updated = await api.deletePhoto(candidate.id);
+      setCandidate(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    }
+  }
+
+  return (
+    <SectionCard title="Candidate photo">
+      {error && <p className="mb-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+      {candidate.photo_filename ? (
+        <div className="flex items-center gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={`/api/candidates/${candidate.id}/photo`}
+            alt={candidate.name}
+            className="h-16 w-16 rounded-md border border-slate-200 object-cover dark:border-slate-700"
+          />
+          <div className="flex flex-col gap-1 text-xs">
+            <span className="truncate text-slate-700 dark:text-slate-300">{candidate.photo_filename}</span>
+            <div className="flex items-center gap-3">
+              <label className="cursor-pointer font-medium text-slate-500 underline hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">
+                {uploading ? "Uploading…" : "Replace"}
+                <input type="file" accept=".jpg,.jpeg,.png" className="hidden" disabled={uploading} onChange={handleFileChange} />
+              </label>
+              <button onClick={handleRemove} className="font-medium text-red-500 hover:underline dark:text-red-400">
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <label className="inline-block cursor-pointer rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700">
+          {uploading ? "Uploading…" : "+ Upload photo (JPG or PNG)"}
+          <input type="file" accept=".jpg,.jpeg,.png" className="hidden" disabled={uploading} onChange={handleFileChange} />
+        </label>
+      )}
+    </SectionCard>
   );
 }
 
@@ -535,6 +752,78 @@ function ResumeSection({
         </label>
       )}
     </SectionCard>
+  );
+}
+
+function IntakeDocumentField({
+  candidate,
+  setCandidate,
+  kind,
+  label,
+}: {
+  candidate: Candidate;
+  setCandidate: (c: Candidate) => void;
+  kind: "education_proof" | "id_proof" | "salary_slip";
+  label: string;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const filename = candidate[`${kind}_filename` as const] as string | null;
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setError(null);
+    setUploading(true);
+    try {
+      const updated = await api.uploadCandidateDocument(candidate.id, kind, file);
+      setCandidate(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleRemove() {
+    setError(null);
+    try {
+      const updated = await api.deleteCandidateDocument(candidate.id, kind);
+      setCandidate(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    }
+  }
+
+  return (
+    <Field label={label}>
+      {error && <p className="mb-1 text-xs text-red-600 dark:text-red-400">{error}</p>}
+      {filename ? (
+        <div className="flex items-center justify-between gap-2 rounded-md border border-slate-100 p-2 text-xs dark:border-slate-700">
+          <a
+            href={`/api/candidates/${candidate.id}/documents/${kind}`}
+            className="truncate text-slate-700 underline hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100"
+          >
+            {filename}
+          </a>
+          <div className="flex shrink-0 items-center gap-2">
+            <label className="cursor-pointer font-medium text-slate-500 underline hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">
+              {uploading ? "Uploading…" : "Replace"}
+              <input type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" disabled={uploading} onChange={handleFileChange} />
+            </label>
+            <button onClick={handleRemove} className="font-medium text-red-500 hover:underline dark:text-red-400">
+              Remove
+            </button>
+          </div>
+        </div>
+      ) : (
+        <label className="inline-block cursor-pointer rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700">
+          {uploading ? "Uploading…" : "+ Upload"}
+          <input type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" disabled={uploading} onChange={handleFileChange} />
+        </label>
+      )}
+    </Field>
   );
 }
 
@@ -610,6 +899,17 @@ function FinalDetailsSection({
       <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
         Must be confirmed before the card can move to Offer Process.
       </p>
+
+      <div className="mt-4 border-t border-slate-100 pt-3 dark:border-slate-700">
+        <p className="mb-2 text-xs font-medium text-slate-600 dark:text-slate-400">
+          Step 1 (Pre-Offer Formalities) intake documents
+        </p>
+        <div className="grid grid-cols-3 gap-3">
+          <IntakeDocumentField candidate={candidate} setCandidate={setCandidate} kind="education_proof" label="Education proof" />
+          <IntakeDocumentField candidate={candidate} setCandidate={setCandidate} kind="id_proof" label="Government ID proof" />
+          <IntakeDocumentField candidate={candidate} setCandidate={setCandidate} kind="salary_slip" label="Salary slip" />
+        </div>
+      </div>
     </SectionCard>
   );
 }
@@ -631,6 +931,10 @@ function InterviewRoundsSection({
 
   return (
     <SectionCard title="Interview round tags">
+      <p className="mb-3 text-xs text-slate-400 dark:text-slate-500">
+        Populated automatically when an interview is scheduled from the Interviews page. Outcome and notes can still
+        be edited here after the interview happens.
+      </p>
       {rounds.map((r, i) => (
         <div key={i} className="mb-3 rounded-md border border-slate-100 p-2 dark:border-slate-700">
           <div className="grid grid-cols-[1fr_120px_1fr_auto] gap-2">
@@ -645,21 +949,41 @@ function InterviewRoundsSection({
               Remove
             </button>
           </div>
-          <input
-            className={`mt-2 ${inputClass}`}
-            placeholder="Panelist emails, comma-separated"
-            value={r.panelist_emails ?? ""}
-            onChange={(e) => update(i, { panelist_emails: e.target.value })}
-          />
+          <div className="mt-2 grid grid-cols-[1fr_auto_auto] gap-2">
+            <input
+              className={inputClass}
+              placeholder="Panelist emails, comma-separated"
+              value={r.panelist_emails ?? ""}
+              onChange={(e) => update(i, { panelist_emails: e.target.value })}
+            />
+            <input
+              type="datetime-local"
+              className={inputClass}
+              title="Scheduled date/time"
+              value={toDatetimeLocalValue(r.scheduled_at)}
+              onChange={(e) => update(i, { scheduled_at: e.target.value ? new Date(e.target.value).toISOString() : undefined })}
+            />
+            <select
+              className={inputClass}
+              title="Duration"
+              value={r.duration_minutes ?? 30}
+              onChange={(e) => update(i, { duration_minutes: Number(e.target.value) })}
+            >
+              <option value={15}>15 min</option>
+              <option value={30}>30 min</option>
+              <option value={60}>60 min</option>
+            </select>
+          </div>
+          {r.scheduled_at && (
+            <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
+              {formatRoundWindow(r.scheduled_at, r.duration_minutes ?? 30)}
+            </p>
+          )}
         </div>
       ))}
-      <button
-        type="button"
-        onClick={() => { setSaved(false); setRounds((r) => [...r, { round_name: "", outcome: "scheduled" }]); }}
-        className="text-xs font-medium text-slate-600 underline dark:text-slate-400"
-      >
-        + Add round
-      </button>
+      {rounds.length === 0 && (
+        <p className="mb-3 text-xs text-slate-400 dark:text-slate-500">No interviews scheduled yet.</p>
+      )}
       <div>
         <SaveButton saved={saved} onClick={async () => { await onSave(rounds); setSaved(true); }} />
       </div>
@@ -676,23 +1000,46 @@ function EmploymentHistorySection({
 }) {
   const [rows, setRows] = useState<EmploymentHistoryEntry[]>(candidate.employment_history);
   const [saved, setSaved] = useState(false);
+  const isFresherIntern = candidate.candidate_track === "fresher_intern";
 
   function update(i: number, patch: Partial<EmploymentHistoryEntry>) {
     setSaved(false);
     setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   }
 
+  // Exclusive — only one entry can be the current employer, since it's what
+  // resolves the HR BGV (Step 4) recipient.
+  function setCurrent(i: number) {
+    setSaved(false);
+    setRows((rs) => rs.map((r, idx) => ({ ...r, is_current: idx === i })));
+  }
+
   return (
-    <SectionCard title="Employment history (one per employer relevant to a reference)">
+    <SectionCard title={isFresherIntern ? "Academic / internship history" : "Employment history (one per employer relevant to a reference)"}>
       {rows.map((r, i) => (
         <div key={r.id} className="mb-3 rounded-md border border-slate-100 p-2 dark:border-slate-700">
           <div className="grid grid-cols-2 gap-2">
-            <input className={inputClass} placeholder="Company name" value={r.company_name} onChange={(e) => update(i, { company_name: e.target.value })} />
-            <input className={inputClass} placeholder="Designation" value={r.designation} onChange={(e) => update(i, { designation: e.target.value })} />
+            <input
+              className={inputClass}
+              placeholder={isFresherIntern ? "Institution / company" : "Company name"}
+              value={r.company_name}
+              onChange={(e) => update(i, { company_name: e.target.value })}
+            />
+            <input
+              className={inputClass}
+              placeholder={isFresherIntern ? "Course / program" : "Designation"}
+              value={r.designation}
+              onChange={(e) => update(i, { designation: e.target.value })}
+            />
             <input className={inputClass} placeholder="Tenure from" value={r.tenure_from} onChange={(e) => update(i, { tenure_from: e.target.value })} />
             <input className={inputClass} placeholder="Tenure to" value={r.tenure_to} onChange={(e) => update(i, { tenure_to: e.target.value })} />
             <input className={inputClass} placeholder="Employee code" value={r.employee_code} onChange={(e) => update(i, { employee_code: e.target.value })} />
-            <input className={inputClass} placeholder="Supervisor name" value={r.supervisor_name} onChange={(e) => update(i, { supervisor_name: e.target.value })} />
+            <input
+              className={inputClass}
+              placeholder={isFresherIntern ? "Faculty / mentor" : "Supervisor name"}
+              value={r.supervisor_name}
+              onChange={(e) => update(i, { supervisor_name: e.target.value })}
+            />
             <input
               className={inputClass}
               placeholder="Reference-check email (work email)"
@@ -700,6 +1047,12 @@ function EmploymentHistorySection({
               onChange={(e) => update(i, { email: e.target.value })}
             />
           </div>
+          {!isFresherIntern && (
+            <label className="mt-2 flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400">
+              <input type="checkbox" checked={!!r.is_current} onChange={() => setCurrent(i)} />
+              Current employer (used for HR Background Verification, Step 4)
+            </label>
+          )}
           <button onClick={() => { setSaved(false); setRows((rs) => rs.filter((_, idx) => idx !== i)); }} className="mt-1 text-xs text-red-500 dark:text-red-400">
             Remove
           </button>
@@ -710,7 +1063,7 @@ function EmploymentHistorySection({
         onClick={() =>
           { setSaved(false); setRows((rs) => [
             ...rs,
-            { id: newId(), company_name: "", tenure_from: "", tenure_to: "", employee_code: "", designation: "", supervisor_name: "", email: "" },
+            { id: newId(), company_name: "", tenure_from: "", tenure_to: "", employee_code: "", designation: "", supervisor_name: "", email: "", is_current: false },
           ]); }
         }
         className="text-xs font-medium text-slate-600 underline dark:text-slate-400"
@@ -769,6 +1122,17 @@ function ReferencesSection({
               <option value="na">N/A</option>
             </select>
           </div>
+          {r.document_pathname && (
+            <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+              Reference-check document sent{r.document_sent_at ? ` ${new Date(r.document_sent_at).toLocaleDateString()}` : ""} —{" "}
+              <a
+                href={`/api/candidates/${candidate.id}/reference-documents/${r.id}`}
+                className="font-medium text-indigo-600 underline dark:text-indigo-400"
+              >
+                download
+              </a>
+            </p>
+          )}
           <button onClick={() => { setSaved(false); setRows((rs) => rs.filter((_, idx) => idx !== i)); }} className="mt-1 text-xs text-red-500 dark:text-red-400">
             Remove
           </button>
@@ -1032,6 +1396,14 @@ function OfferStepsSection({
           </div>
         );
       })}
+      {candidate.candidate_track === "experienced" && candidate.bgv_document_pathname && (
+        <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+          HR BGV document sent —{" "}
+          <a href={`/api/candidates/${candidate.id}/bgv-document`} className="font-medium text-indigo-600 underline dark:text-indigo-400">
+            download
+          </a>
+        </p>
+      )}
       <div>
         <SaveButton saved={saved} onClick={async () => { await onSave(steps); setSaved(true); }} />
       </div>
@@ -1039,69 +1411,12 @@ function OfferStepsSection({
   );
 }
 
-const DOC_CATEGORIES: DocumentRecord["category"][] = [
-  "education_proof",
-  "id_proof",
-  "salary_slip",
-  "passport_photo",
-  "reference_response",
-  "offer_letter_draft",
-  "signed_offer_letter",
-  "bgv_response",
-  "employee_agreement_draft",
-  "signed_agreement",
-];
-
-function DocumentsSection({
-  candidate,
-  onSave,
-}: {
-  candidate: Candidate;
-  onSave: (docs: DocumentRecord[]) => Promise<Candidate | undefined>;
-}) {
-  const [docs, setDocs] = useState<DocumentRecord[]>(candidate.documents);
-  const [saved, setSaved] = useState(false);
-
-  function update(i: number, patch: Partial<DocumentRecord>) {
-    setSaved(false);
-    setDocs((ds) => ds.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
-  }
-
-  return (
-    <SectionCard title="Document repository">
-      {docs.map((d, i) => (
-        <div key={d.id} className="mb-2 grid grid-cols-[1fr_1fr_1.5fr_auto] gap-2">
-          <select className={inputClass} value={d.category} onChange={(e) => update(i, { category: e.target.value as DocumentRecord["category"] })}>
-            {DOC_CATEGORIES.map((c) => (
-              <option key={c} value={c}>
-                {c.replace(/_/g, " ")}
-              </option>
-            ))}
-          </select>
-          <input className={inputClass} placeholder="Name" value={d.name} onChange={(e) => update(i, { name: e.target.value })} />
-          <input className={inputClass} placeholder="Link or note" value={d.link_or_note} onChange={(e) => update(i, { link_or_note: e.target.value })} />
-          <button onClick={() => { setSaved(false); setDocs((ds) => ds.filter((_, idx) => idx !== i)); }} className="text-xs text-red-500 dark:text-red-400">
-            Remove
-          </button>
-        </div>
-      ))}
-      <button
-        type="button"
-        onClick={() =>
-          { setSaved(false); setDocs((ds) => [
-            ...ds,
-            { id: newId(), category: "education_proof", name: "", link_or_note: "", uploaded_at: new Date().toISOString() },
-          ]); }
-        }
-        className="text-xs font-medium text-slate-600 underline dark:text-slate-400"
-      >
-        + Add document
-      </button>
-      <div>
-        <SaveButton saved={saved} onClick={async () => { await onSave(docs); setSaved(true); }} />
-      </div>
-    </SectionCard>
-  );
+// version is an auto-incrementing revision counter, bumped whenever
+// review_status transitions into "pending" (Under Review) — the recruiter
+// never types it directly. Tolerant of legacy non-numeric values.
+function nextVersion(current: string): string {
+  const n = parseInt(current, 10);
+  return String(Number.isFinite(n) ? n + 1 : 1);
 }
 
 function ApprovalRow({
@@ -1115,18 +1430,37 @@ function ApprovalRow({
   onChange: (v: OfferDocumentApproval) => void;
   showSignature?: boolean;
 }) {
-  const v: OfferDocumentApproval = value ?? { version: "", review_status: "pending", reviewer_comments: "" };
+  // Spread defaults first so a legacy candidate row saved before doc_link
+  // existed (missing the field entirely, not just the whole object) still
+  // renders a controlled input instead of `undefined`.
+  const v: OfferDocumentApproval = { doc_link: "", version: "", review_status: "pending", reviewer_comments: "", ...value };
   return (
     <div className="mb-3 rounded-md border border-slate-100 p-2 dark:border-slate-700">
-      <div className="mb-1 text-xs font-medium text-slate-700 dark:text-slate-300">{label}</div>
+      <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-slate-700 dark:text-slate-300">
+        {label}
+        {v.version && <span className="text-[10px] font-normal text-slate-400 dark:text-slate-500">v{v.version}</span>}
+      </div>
       <div className="grid grid-cols-2 gap-2">
-        <input className={inputClass} placeholder="Version" value={v.version} onChange={(e) => onChange({ ...v, version: e.target.value })} />
+        <input
+          className={`col-span-2 ${inputClass}`}
+          placeholder="Document link (Google Docs / Word)"
+          value={v.doc_link}
+          onChange={(e) => onChange({ ...v, doc_link: e.target.value })}
+        />
         <select
           className={inputClass}
           value={v.review_status}
-          onChange={(e) => onChange({ ...v, review_status: e.target.value as OfferDocumentApproval["review_status"] })}
+          onChange={(e) => {
+            const nextStatus = e.target.value as OfferDocumentApproval["review_status"];
+            // A genuine transition into "Under Review" — first submission
+            // or a resubmission after changes — bumps the revision counter,
+            // same moment the notification-triggering diff (in
+            // detectDocumentApprovalEvents) fires on save.
+            const enteringReview = nextStatus === "pending" && v.review_status !== "pending";
+            onChange({ ...v, review_status: nextStatus, version: enteringReview ? nextVersion(v.version) : v.version });
+          }}
         >
-          <option value="pending">Pending</option>
+          <option value="pending">Under Review</option>
           <option value="changes_requested">Changes requested</option>
           <option value="approved">Approved</option>
         </select>
@@ -1160,6 +1494,30 @@ function ApprovalsSection({
 }) {
   const [approvals, setApprovals] = useState(candidate.offer_document_approvals);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // The Employee Agreement PDF (EmployeeAgreementPdfSection, below) saves
+  // via its own dedicated route rather than this section's deferred Save
+  // button — resync so an upload there doesn't get silently clobbered by a
+  // stale local copy the next time this section's Save is clicked.
+  useEffect(() => {
+    setApprovals(candidate.offer_document_approvals);
+  }, [candidate.offer_document_approvals]);
+
+  async function handleSave() {
+    setError(null);
+    const missingLink = (["offer_letter", "employee_agreement"] as const).find(
+      (docType) => approvals[docType]?.review_status === "pending" && !approvals[docType]?.doc_link
+    );
+    if (missingLink) {
+      setError(
+        `Add a document link before marking ${missingLink === "offer_letter" ? "the Offer Letter" : "the Employee Agreement"} Under Review.`
+      );
+      return;
+    }
+    await onSave(approvals);
+    setSaved(true);
+  }
 
   return (
     <SectionCard title="Offer document approval status">
@@ -1174,7 +1532,266 @@ function ApprovalsSection({
         showSignature
         onChange={(v) => { setSaved(false); setApprovals((a) => ({ ...a, employee_agreement: v })); }}
       />
-      <SaveButton saved={saved} onClick={async () => { await onSave(approvals); setSaved(true); }} />
+      {error && <p className="mb-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+      <SaveButton saved={saved} onClick={handleSave} />
+    </SectionCard>
+  );
+}
+
+// Once the Employee Agreement's content is approved (ApprovalsSection
+// above), the recruiter uploads the final PDF here; once HR Management has
+// signed it externally (e.g. DocuSign), the same control re-uploads the
+// signed copy into the same field. Marking it "Signed" is still done via
+// the Signature dropdown in ApprovalsSection — that's what actually fires
+// the candidate-facing "signed" notification, unchanged from before.
+function EmployeeAgreementPdfSection({
+  candidate,
+  setCandidate,
+}: {
+  candidate: Candidate;
+  setCandidate: (c: Candidate) => void;
+}) {
+  const approval = candidate.offer_document_approvals.employee_agreement;
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (approval?.review_status !== "approved") return null;
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setError(null);
+    setUploading(true);
+    try {
+      const updated = await api.uploadEmployeeAgreementPdf(candidate.id, file);
+      setCandidate(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  const isSigned = approval.signature_status === "signed";
+
+  return (
+    <SectionCard title="Employee Agreement — final PDF">
+      {error && <p className="mb-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+      {approval.final_pdf_filename ? (
+        <div className="flex items-center justify-between gap-2 rounded-md border border-slate-100 p-2 text-sm dark:border-slate-700">
+          <a
+            href={`/api/candidates/${candidate.id}/employee-agreement-pdf`}
+            className="truncate text-slate-700 underline hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100"
+          >
+            {approval.final_pdf_filename}
+          </a>
+          <label className="shrink-0 cursor-pointer text-xs font-medium text-slate-500 underline hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">
+            {uploading ? "Uploading…" : isSigned ? "Replace" : "Upload signed copy"}
+            <input type="file" accept=".pdf" className="hidden" disabled={uploading} onChange={handleFileChange} />
+          </label>
+        </div>
+      ) : (
+        <label className="inline-block cursor-pointer rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700">
+          {uploading ? "Uploading…" : "+ Upload final agreement (PDF)"}
+          <input type="file" accept=".pdf" className="hidden" disabled={uploading} onChange={handleFileChange} />
+        </label>
+      )}
+      <p className="mt-1.5 text-xs text-slate-400 dark:text-slate-500">
+        {approval.final_pdf_filename
+          ? isSigned
+            ? "Signed and on file."
+            : "Uploaded — sign it externally (e.g. DocuSign), then upload the signed copy here, and mark it Signed above."
+          : "Once uploaded, HR Management is notified to sign it externally."}
+      </p>
+    </SectionCard>
+  );
+}
+
+const HRMS_STATUS_BADGE: Record<"awaiting_acknowledgement" | "acknowledged", string> = {
+  awaiting_acknowledgement: "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-400",
+  acknowledged: "bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-400",
+};
+
+// hrms_handover_status is only ever set once a candidate reaches the
+// Handover to HRMS stage (see the move_stage handler) — null means they
+// haven't gotten there yet, so this section has nothing to show.
+function HrmsHandoverSection({
+  candidate,
+  setCandidate,
+}: {
+  candidate: Candidate;
+  setCandidate: (c: Candidate) => void;
+}) {
+  const [acknowledging, setAcknowledging] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const status = candidate.hrms_handover_status;
+
+  if (!status || status === "not_sent") return null;
+
+  async function handleAcknowledge() {
+    setError(null);
+    setAcknowledging(true);
+    try {
+      setCandidate(await api.markHrmsAcknowledged(candidate.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setAcknowledging(false);
+    }
+  }
+
+  return (
+    <SectionCard title="Sent to HRMS">
+      {error && <p className="mb-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${HRMS_STATUS_BADGE[status]}`}>
+            {HRMS_HANDOVER_STATUS_LABELS[status]}
+          </span>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Handed off {candidate.hrms_handed_off_at ? new Date(candidate.hrms_handed_off_at).toLocaleString() : "—"}
+            {status === "acknowledged" && candidate.hrms_acknowledged_at
+              ? ` · Acknowledged ${new Date(candidate.hrms_acknowledged_at).toLocaleString()}`
+              : ""}
+          </p>
+        </div>
+        {status === "awaiting_acknowledgement" && (
+          <button
+            onClick={handleAcknowledge}
+            disabled={acknowledging}
+            className="shrink-0 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+          >
+            {acknowledging ? "Marking…" : "Mark acknowledged"}
+          </button>
+        )}
+      </div>
+    </SectionCard>
+  );
+}
+
+interface TimelineEntry {
+  key: string;
+  timestamp: string;
+  kind: "stage_move" | "document" | "interview" | "note";
+  actor: string;
+  headline: string;
+  detail?: string;
+}
+
+const TIMELINE_KIND_LABEL: Record<TimelineEntry["kind"], string> = {
+  stage_move: "Stage move",
+  document: "Document",
+  interview: "Interview",
+  note: "Note",
+};
+
+const TIMELINE_KIND_DOT: Record<TimelineEntry["kind"], string> = {
+  stage_move: "bg-indigo-400",
+  document: "bg-sky-400",
+  interview: "bg-violet-400",
+  note: "bg-amber-400",
+};
+
+// A friendlier, curated subset of audit_log (stage moves, document/resume
+// attachments, interview scheduling) merged with candidate_notes — NOT a
+// second source of truth. Everything here already lives in audit_log except
+// notes; nothing new is logged just for this view. Matches on the same
+// action strings every write route already uses (see appendAudit call sites
+// across the candidates/resume/photo/documents/employee-agreement routes).
+function buildTimeline(candidate: Candidate): TimelineEntry[] {
+  const fromAudit = candidate.audit_log
+    .map((entry: AuditLogEntry, i): TimelineEntry | null => {
+      if (entry.action === "Moved stage") {
+        return { key: `audit-${i}`, timestamp: entry.timestamp, kind: "stage_move", actor: entry.actor, headline: entry.details ?? "Moved stage" };
+      }
+      if (entry.action.startsWith("Uploaded ") || entry.action.startsWith("Removed ")) {
+        return { key: `audit-${i}`, timestamp: entry.timestamp, kind: "document", actor: entry.actor, headline: entry.action, detail: entry.details };
+      }
+      if (entry.action === "Updated fields" && entry.details?.split(", ").includes("interview_rounds")) {
+        return { key: `audit-${i}`, timestamp: entry.timestamp, kind: "interview", actor: entry.actor, headline: "Interview round scheduled or updated" };
+      }
+      return null;
+    })
+    .filter((e): e is TimelineEntry => e !== null);
+
+  const fromNotes: TimelineEntry[] = candidate.candidate_notes.map((note: CandidateNote, i) => ({
+    key: `note-${i}`,
+    timestamp: note.created_at,
+    kind: "note",
+    actor: note.author,
+    headline: "Note added",
+    detail: note.text,
+  }));
+
+  return [...fromAudit, ...fromNotes].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+function TimelineSection({
+  candidate,
+  setCandidate,
+}: {
+  candidate: Candidate;
+  setCandidate: (c: Candidate) => void;
+}) {
+  const [noteText, setNoteText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleAddNote() {
+    if (!noteText.trim()) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      const updated = await api.addCandidateNote(candidate.id, noteText);
+      setCandidate(updated);
+      setNoteText("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const entries = buildTimeline(candidate);
+
+  return (
+    <SectionCard title="Activity timeline">
+      <div className="mb-3">
+        <textarea
+          className={`${inputClass} min-h-[60px]`}
+          placeholder="Add a note…"
+          value={noteText}
+          onChange={(e) => setNoteText(e.target.value)}
+        />
+        <div className="mt-1.5 flex items-center gap-2">
+          <button
+            onClick={handleAddNote}
+            disabled={submitting || !noteText.trim()}
+            className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+          >
+            {submitting ? "Adding…" : "Add note"}
+          </button>
+          {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
+        </div>
+      </div>
+
+      <ul className="max-h-72 space-y-2.5 overflow-y-auto text-xs">
+        {entries.map((entry) => (
+          <li key={entry.key} className="flex items-start gap-2">
+            <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${TIMELINE_KIND_DOT[entry.kind]}`} />
+            <div className="min-w-0">
+              <span className="text-slate-400 dark:text-slate-500">{new Date(entry.timestamp).toLocaleString()}</span>{" "}
+              <span className="text-slate-400 dark:text-slate-500">· {TIMELINE_KIND_LABEL[entry.kind]} ·</span>{" "}
+              <strong className="text-slate-700 dark:text-slate-300">{entry.actor}</strong>: {entry.headline}
+              {entry.detail && (
+                <span className="text-slate-600 dark:text-slate-400"> — {entry.detail}</span>
+              )}
+            </div>
+          </li>
+        ))}
+        {entries.length === 0 && <li className="text-slate-400 dark:text-slate-500">No activity yet.</li>}
+      </ul>
     </SectionCard>
   );
 }

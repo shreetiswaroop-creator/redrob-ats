@@ -1,7 +1,7 @@
 "use client";
 
 import { DndContext, DragEndEvent, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
-import { Candidate, PendingEmailInfo, Requisition, RequisitionStatus, Stage, STAGE_ORDER } from "@/lib/types";
+import { Candidate, CustomFieldDefinition, CustomFieldValues, PendingEmailInfo, Requisition, RequisitionStatus, RequisitionUrgency, Stage, STAGE_ORDER } from "@/lib/types";
 import { COLUMNS, REJECTED_COLUMN_KEY } from "@/lib/columns";
 import { Column } from "./Column";
 import { RequisitionCardFace } from "./RequisitionCardFace";
@@ -12,27 +12,36 @@ export function KanbanBoard({
   candidates,
   pendingEmailByCandidate,
   onChangeRequisitionStatus,
-  onAddCandidate,
+  onChangeClosureTat,
+  onChangeRequisitionDetails,
   onOpenCandidate,
   onMoveStage,
+  onRequestMoveStage,
   onDropReject,
   onRestore,
   onCancelPendingEmail,
   onSetOnHold,
   onClearOnHold,
+  customFieldDefinitions,
 }: {
   requisitions: Requisition[];
   candidates: Candidate[];
   pendingEmailByCandidate: Record<string, PendingEmailInfo>;
   onChangeRequisitionStatus: (id: string, status: RequisitionStatus, note?: string) => void;
-  onAddCandidate: (req: Requisition) => void;
+  onChangeClosureTat: (id: string, days: number) => void;
+  onChangeRequisitionDetails: (
+    id: string,
+    fields: { urgency?: RequisitionUrgency; description?: string; custom_fields?: CustomFieldValues }
+  ) => void;
   onOpenCandidate: (candidate: Candidate) => void;
   onMoveStage: (id: string, toStage: Stage) => void;
+  onRequestMoveStage: (id: string, toStage: Stage) => void;
   onDropReject: (id: string) => void;
   onRestore: (id: string) => void;
   onCancelPendingEmail: (candidateId: string, notificationId: string) => void;
   onSetOnHold: (id: string) => void;
   onClearOnHold: (id: string) => void;
+  customFieldDefinitions: CustomFieldDefinition[];
 }) {
   // Without a distance threshold, dnd-kit treats every pointerdown as a drag
   // start (even with zero movement) and swallows the resulting click — which
@@ -59,7 +68,14 @@ export function KanbanBoard({
     }
     const col = COLUMNS.find((c) => c.key === columnKey);
     if (col?.kind === "candidate") {
-      onMoveStage(id, col.key as Stage);
+      const toStage = col.key as Stage;
+      const candidate = candidates.find((c) => c.id === id);
+      const isForward = candidate ? STAGE_ORDER.indexOf(toStage) > STAGE_ORDER.indexOf(candidate.current_stage) : false;
+      if (isForward) {
+        onRequestMoveStage(id, toStage);
+      } else if (candidate && toStage !== candidate.current_stage) {
+        onMoveStage(id, toStage);
+      }
     }
   }
 
@@ -80,7 +96,9 @@ export function KanbanBoard({
                     key={r.id}
                     requisition={r}
                     onChangeStatus={(status, note) => onChangeRequisitionStatus(r.id, status, note)}
-                    onAddCandidate={() => onAddCandidate(r)}
+                    onChangeClosureTat={(days) => onChangeClosureTat(r.id, days)}
+                    onChangeDetails={(fields) => onChangeRequisitionDetails(r.id, fields)}
+                    customFieldDefinitions={customFieldDefinitions.filter((d) => d.entity_type === "requisition")}
                   />
                 ))}
               </Column>
@@ -99,7 +117,7 @@ export function KanbanBoard({
                   nextStage={nextStageFor(c)}
                   onMoveNext={() => {
                     const next = nextStageFor(c);
-                    if (next) onMoveStage(c.id, next);
+                    if (next) onRequestMoveStage(c.id, next);
                   }}
                   onReject={() => onDropReject(c.id)}
                   onCancelPendingEmail={(notificationId) => onCancelPendingEmail(c.id, notificationId)}

@@ -8,9 +8,38 @@ import {
   OfferDocumentApprovals,
   STAGE_LABELS,
   Stage,
+  EmailTemplate,
+  EmailTemplateKey,
+  EMAIL_TEMPLATE_KEYS,
 } from "./types";
 import { appendAudit } from "./audit";
 import { computeStepTatStatus } from "./tat";
+import { decryptToken } from "./token-crypto";
+import { refreshAccessToken } from "./google-oauth";
+import { sendGmailMessage } from "./google-gmail";
+
+export type EmailTemplateMap = Partial<Record<EmailTemplateKey, EmailTemplate>>;
+
+export function renderTemplate(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, key: string) => vars[key] ?? "");
+}
+
+// Offer-stage templates fire after confirm_final_details, so
+// designation/compensation/doj/location are already on the candidate
+// record by then. A template only pulls the {{tokens}} it actually
+// contains, so it's fine to hand every template the full set.
+export function baseMergeVars(c: Candidate, req: Requisition): Record<string, string> {
+  return {
+    candidate_name: c.name,
+    candidate_code: c.candidate_code,
+    requisition_title: req.title,
+    req_code: req.req_code,
+    designation: c.final_designation ?? "",
+    compensation: c.final_compensation ?? "",
+    doj: c.final_doj ?? "",
+    location: c.final_location ?? "",
+  };
+}
 
 export interface NotificationDraft {
   trigger_event: string;
@@ -20,7 +49,7 @@ export interface NotificationDraft {
   isCorrection?: boolean; // true for "please disregard our previous message" emails — never delayed further
 }
 
-export const PENDING_WINDOW_MS = 60 * 60 * 1000; // 60 minutes, per the send-delay buffer
+export const PENDING_WINDOW_MS = 15 * 60 * 1000; // 15 minutes, per the send-delay buffer
 
 export function isCandidateFacing(draft: NotificationDraft): boolean {
   return draft.recipients.some((r) => r.role === "Candidate");
@@ -37,7 +66,23 @@ export const EMPTY_ORG_SETTINGS: OrgSettings = {
   common_hr_mailbox_email: null,
   hrms_team_email: null,
   common_hr_gmail_connected_at: null,
+  live_sending_enabled: false,
+  default_step_tat_hours: 24,
+  logo_url: null,
 };
+
+// Fetched once per request alongside org settings (same pattern), not once
+// per notification builder call — these builders stay synchronous.
+export async function fetchEmailTemplates(supabase: SupabaseClient): Promise<EmailTemplateMap> {
+  const { data } = await supabase.from("email_templates").select("*");
+  const map: EmailTemplateMap = {};
+  for (const row of (data as EmailTemplate[]) ?? []) {
+    if (EMAIL_TEMPLATE_KEYS.includes(row.template_key as EmailTemplateKey)) {
+      map[row.template_key as EmailTemplateKey] = row;
+    }
+  }
+  return map;
+}
 
 export function candidateRecipient(c: Candidate) {
   return recipient("Candidate", c.name, c.personal_email);
@@ -84,54 +129,200 @@ export function requisitionApprovedNotification(req: Requisition): NotificationD
   };
 }
 
-export function candidateMovedInterviewNotification(c: Candidate, req: Requisition): NotificationDraft {
+// Moved to Screening — falls through the genericStageMovedNotification
+// catch-all before this phase; now gets its own dedicated content, same
+// pattern as candidateMovedInterviewNotification below.
+export function movedToScreeningNotification(
+  c: Candidate,
+  req: Requisition,
+  templates: EmailTemplateMap = {}
+): NotificationDraft {
+  const recipients = [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c)];
+  const template = templates.moved_to_screening;
+  if (template) {
+    const vars = baseMergeVars(c, req);
+    return {
+      trigger_event: "moved_to_screening",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
   return {
-    trigger_event: "candidate_moved_interview",
-    recipients: [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c), ...panelRecipients(c)],
-    subject: `Interview scheduled — ${c.name} (${c.candidate_code})`,
-    body: `${c.name} has moved to the Interview Round stage for ${req.title} (${req.req_code}). Interview details to follow.`,
+    trigger_event: "moved_to_screening",
+    recipients,
+    subject: `Your candidature has moved to Screening — ${req.title}`,
+    body: `Hi ${c.name}, your candidature for ${req.title} (${c.candidate_code}) has moved to the Screening round.`,
   };
 }
 
+export function candidateMovedInterviewNotification(
+  c: Candidate,
+  req: Requisition,
+  templates: EmailTemplateMap = {}
+): NotificationDraft {
+  const recipients = [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c), ...panelRecipients(c)];
+  const template = templates.interview_stage;
+  if (template) {
+    const vars = baseMergeVars(c, req);
+    return {
+      trigger_event: "candidate_moved_interview",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
+  return {
+    trigger_event: "candidate_moved_interview",
+    recipients,
+    subject: `Your candidature has moved to the Interview stage — ${req.title}`,
+    body: `Hi ${c.name}, your candidature for ${req.title} (${c.candidate_code}) has moved to the Interview stage. Our recruiter will call you shortly to schedule it.`,
+  };
+}
+
+// The date/time formatting in the candidate-facing email uses a fixed IST
+// zone (this org's locations are all in India) rather than the server's own
+// timezone, so the printed time is meaningful regardless of where the
+// serverless function happens to run.
+const IST_DATE_OPTS: Intl.DateTimeFormatOptions = { dateStyle: "full", timeZone: "Asia/Kolkata" };
+const IST_TIME_OPTS: Intl.DateTimeFormatOptions = { timeStyle: "short", timeZone: "Asia/Kolkata" };
+
+// meetingLink is manually pasted in by the recruiter on the scheduling form
+// (a real Google Meet link would need the Calendar API's conferencing
+// scopes, which are blocked by the same Workspace org-policy issue as
+// Gmail — see project notes). If provided, it renders as its own line; if
+// blank, the {{meeting_link}} line is simply empty rather than showing a
+// fake/broken link — this upgrades to an auto-created link with no
+// template changes once Calendar API access unblocks.
+export function interviewScheduledNotification(
+  c: Candidate,
+  req: Requisition,
+  roundName: string,
+  scheduledAtIso: string,
+  durationMinutes: number,
+  templates: EmailTemplateMap = {},
+  meetingLink?: string
+): NotificationDraft {
+  const recipients = [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c), ...panelRecipients(c)];
+  const scheduledDate = new Date(scheduledAtIso);
+  const vars = {
+    ...baseMergeVars(c, req),
+    round_name: roundName,
+    interview_date: scheduledDate.toLocaleDateString("en-IN", IST_DATE_OPTS),
+    interview_time: `${scheduledDate.toLocaleTimeString("en-IN", IST_TIME_OPTS)} IST`,
+    duration: `${durationMinutes} minutes`,
+    meeting_link: meetingLink ? `Meeting link: ${meetingLink}` : "",
+  };
+  const template = templates.interview_scheduled;
+  if (template) {
+    return {
+      trigger_event: "interview_scheduled",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
+  return {
+    trigger_event: "interview_scheduled",
+    recipients,
+    subject: `${roundName} scheduled — ${req.title}`,
+    body: `${c.name}'s ${roundName} interview for ${req.title} (${c.candidate_code}) is scheduled for ${vars.interview_date} at ${vars.interview_time} (${vars.duration}).${
+      vars.meeting_link ? `\n\n${vars.meeting_link}` : ""
+    }`,
+  };
+}
+
+// Passed the final interview round — previously internal-only (an action
+// prompt for HM/HR/recruiter to go confirm final details); now also tells
+// the candidate directly, same shared-draft pattern as every other
+// candidate-facing notification in this file.
 export function selectedAwaitingFinalDetailsNotification(
   c: Candidate,
   req: Requisition,
-  org: OrgSettings
+  org: OrgSettings,
+  templates: EmailTemplateMap = {}
 ): NotificationDraft {
+  const recipients = [candidateRecipient(c), hiringManagerRecipient(req), hrManagementRecipient(org), recruiterRecipient(c)];
+  const template = templates.passed_final_round;
+  if (template) {
+    const vars = baseMergeVars(c, req);
+    return {
+      trigger_event: "selected_awaiting_final_details",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
   return {
     trigger_event: "selected_awaiting_final_details",
-    recipients: [hiringManagerRecipient(req), hrManagementRecipient(org), recruiterRecipient(c)],
-    subject: `Action needed: confirm final offer details — ${c.name}`,
-    body: `${c.name} has cleared all interview rounds for ${req.title} (${req.req_code}). Please confirm final compensation, DOJ, designation, and location.`,
+    recipients,
+    subject: `You've cleared the final round — ${req.title}`,
+    body: `Hi ${c.name}, congratulations — you've passed the final interview round for ${req.title} (${req.req_code}). Our recruiter will call you shortly to discuss final details.`,
   };
 }
 
 export function finalDetailsConfirmedNotification(
   c: Candidate,
   req: Requisition,
-  org: OrgSettings
+  org: OrgSettings,
+  templates: EmailTemplateMap = {}
 ): NotificationDraft {
+  const recipients = [candidateRecipient(c), recruiterRecipient(c), hiringManagerRecipient(req), hrManagementRecipient(org)];
+  const template = templates.final_details_confirmed_candidate;
+  if (template) {
+    const vars = baseMergeVars(c, req);
+    return {
+      trigger_event: "final_details_confirmed",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
   return {
     trigger_event: "final_details_confirmed",
-    recipients: [recruiterRecipient(c), hiringManagerRecipient(req), hrManagementRecipient(org)],
-    subject: `Final details confirmed — Offer Process starting for ${c.name}`,
-    body: `Final offer details for ${c.name} (${req.title}) are confirmed: ${c.final_designation}, ${c.final_compensation}, DOJ ${c.final_doj}, ${c.final_location}${
+    recipients,
+    subject: `Your final offer details are confirmed — ${req.title}`,
+    body: `Hi ${c.name}, your final offer details for ${req.title} have been confirmed: ${c.final_designation}, ${c.final_compensation}, DOJ ${c.final_doj}, ${c.final_location}${
       c.final_benefits ? `, benefits: ${c.final_benefits}` : ""
-    }${c.final_notes ? ` (note: ${c.final_notes})` : ""}. The Offer Process is starting.`,
+    }. The Offer Process is now starting.`,
   };
 }
+
+// step_number -> the template key that covers its "initiated" email (Steps
+// 1/2/4 — Pre-Offer, Reference Check, HR BGV). Every other transition
+// (these steps' "completed", and Step 3/5 entirely) keeps the hardcoded
+// text below — this task only touches the 3 keys here.
+const OFFER_STEP_TEMPLATE_KEY: Partial<Record<number, EmailTemplateKey>> = {
+  1: "pre_offer",
+  2: "reference_check",
+  4: "hr_bgv",
+};
 
 export function offerStepNotification(
   c: Candidate,
   req: Requisition,
   org: OrgSettings,
   step: OfferStep,
-  transition: "initiated" | "completed"
+  transition: "initiated" | "completed",
+  templates: EmailTemplateMap = {}
 ): NotificationDraft {
   const recipients: NotificationRecipient[] =
     step.step_number === 1
       ? [candidateRecipient(c), recruiterRecipient(c)]
       : [recruiterRecipient(c), commonHrMailboxRecipient(org)];
+
+  const templateKey = transition === "initiated" ? OFFER_STEP_TEMPLATE_KEY[step.step_number] : undefined;
+  const template = templateKey ? templates[templateKey] : undefined;
+  if (template) {
+    const vars = baseMergeVars(c, req);
+    return {
+      trigger_event: `offer_step_${step.step_number}_${transition}`,
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
+
   return {
     trigger_event: `offer_step_${step.step_number}_${transition}`,
     recipients,
@@ -140,12 +331,27 @@ export function offerStepNotification(
   };
 }
 
-export function offerAcceptedCompletedNotification(c: Candidate, req: Requisition): NotificationDraft {
+export function offerAcceptedCompletedNotification(
+  c: Candidate,
+  req: Requisition,
+  templates: EmailTemplateMap = {}
+): NotificationDraft {
+  const recipients = [candidateRecipient(c), recruiterRecipient(c), hiringManagerRecipient(req)];
+  const template = templates.offer_accepted_completed_candidate;
+  if (template) {
+    const vars = baseMergeVars(c, req);
+    return {
+      trigger_event: "offer_accepted_completed",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
   return {
     trigger_event: "offer_accepted_completed",
-    recipients: [recruiterRecipient(c), hiringManagerRecipient(req)],
-    subject: `Offer accepted — ${c.name} has signed the Employee Agreement`,
-    body: `${c.name} (${c.candidate_code}) has signed and returned the Employee Agreement for ${req.title}. All 5 offer steps are complete.`,
+    recipients,
+    subject: `Welcome aboard, ${c.name}!`,
+    body: `Hi ${c.name}, the offer process for ${req.title} is now complete. We look forward to you joining us on ${c.final_doj ?? "the agreed date"}.`,
   };
 }
 
@@ -167,10 +373,26 @@ export function genericStageMovedNotification(c: Candidate, req: Requisition, to
   };
 }
 
-export function rejectedNotification(c: Candidate, req: Requisition, reason: string): NotificationDraft {
+export function rejectedNotification(
+  c: Candidate,
+  req: Requisition,
+  reason: string,
+  templates: EmailTemplateMap = {}
+): NotificationDraft {
+  const recipients = [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c)];
+  const template = templates.rejection;
+  if (template) {
+    const vars = { ...baseMergeVars(c, req), reason };
+    return {
+      trigger_event: "candidate_rejected",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
   return {
     trigger_event: "candidate_rejected",
-    recipients: [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c)],
+    recipients,
     subject: `Update on your application — ${req.title}`,
     body: `Thank you for your interest in ${req.title}. After careful consideration, we will not be moving forward at this time.\n\n(Internal note — reason: ${reason})`,
   };
@@ -179,24 +401,51 @@ export function rejectedNotification(c: Candidate, req: Requisition, reason: str
 // Rejection → Restore correction: only used when the original rejection
 // email already sent (if it was still pending, we just cancel it — no email
 // needed at all).
-export function rejectionDisregardNotification(c: Candidate, req: Requisition): NotificationDraft {
+export function rejectionDisregardNotification(
+  c: Candidate,
+  req: Requisition,
+  templates: EmailTemplateMap = {}
+): NotificationDraft {
+  const recipients = [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c)];
+  const template = templates.reconsideration;
+  if (template) {
+    const vars = baseMergeVars(c, req);
+    return {
+      trigger_event: "candidate_rejected_disregard",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+      isCorrection: true,
+    };
+  }
   return {
     trigger_event: "candidate_rejected_disregard",
-    recipients: [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c)],
+    recipients,
     subject: `Please disregard our previous message — ${req.title}`,
     body: `Please disregard our previous message about your application for ${req.title}. Your application is active and under review — we apologize for the confusion.`,
     isCorrection: true,
   };
 }
 
-type DocEvent = "draft_uploaded" | "changes_requested" | "approved" | "signed";
+type DocEvent = "draft_uploaded" | "changes_requested" | "approved" | "final_pdf_uploaded" | "signed";
+
+// Only these two docType/event combinations (the ones that actually send to
+// the candidate) have an editable template — draft_uploaded/changes_requested
+// stay internal, hardcoded notices.
+function offerDocumentTemplateKey(docType: "offer_letter" | "employee_agreement", event: DocEvent): EmailTemplateKey | undefined {
+  if (docType === "offer_letter" && event === "approved") return "offer_letter";
+  if (docType === "employee_agreement" && event === "signed") return "employee_agreement";
+  return undefined;
+}
 
 export function offerDocumentNotification(
   c: Candidate,
   req: Requisition,
   org: OrgSettings,
   docType: "offer_letter" | "employee_agreement",
-  event: DocEvent
+  event: DocEvent,
+  templates: EmailTemplateMap = {},
+  docLink?: string
 ): NotificationDraft {
   const label = docType === "offer_letter" ? "Offer Letter" : "Employee Agreement";
   let recipients: NotificationRecipient[];
@@ -211,19 +460,52 @@ export function offerDocumentNotification(
       subject = `Changes requested on ${label} — ${c.name}`;
       break;
     case "approved":
-      recipients = [candidateRecipient(c), recruiterRecipient(c)];
-      subject = `${label} approved and sent to ${c.name}`;
+      // Offer Letter's "approved" IS the candidate send — no signature
+      // stage. Employee Agreement's content approval is an internal
+      // milestone only (PRD §7's signature loop still has to happen) — the
+      // candidate isn't notified until it's actually signed.
+      if (docType === "employee_agreement") {
+        recipients = [recruiterRecipient(c)];
+        subject = `${label} content approved — upload the final PDF for ${c.name}`;
+      } else {
+        recipients = [candidateRecipient(c), recruiterRecipient(c)];
+        subject = `${label} approved and sent to ${c.name}`;
+      }
+      break;
+    case "final_pdf_uploaded":
+      recipients = [hrManagementRecipient(org)];
+      subject = `${label} ready to sign — ${c.name}`;
       break;
     case "signed":
       recipients = [candidateRecipient(c), recruiterRecipient(c)];
       subject = `${label} e-signed and sent to ${c.name}`;
       break;
   }
+
+  const templateKey = offerDocumentTemplateKey(docType, event);
+  const template = templateKey ? templates[templateKey] : undefined;
+  if (template) {
+    const vars = { ...baseMergeVars(c, req), doc_link: docLink ?? "" };
+    return {
+      trigger_event: `${docType}_${event}`,
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
+
+  const instruction =
+    event === "final_pdf_uploaded"
+      ? " Download it from the candidate's card and sign it in your e-signature tool of choice (e.g. DocuSign), then upload the signed copy back to the same field."
+      : docLink
+        ? ` Review it here: ${docLink}`
+        : "";
+
   return {
     trigger_event: `${docType}_${event}`,
     recipients,
     subject,
-    body: `${subject} (${req.title}, ${c.candidate_code}).`,
+    body: `${subject} (${req.title}, ${c.candidate_code}).${instruction}`,
   };
 }
 
@@ -242,19 +524,80 @@ export function tatNotification(
   };
 }
 
+// Steps 1/3/5 are candidate-facing/personal-mailbox steps (Pre-Offer,
+// Offer Letter, Employee Agreement) — the candidate is literally the one
+// expected to respond, so only these get pulled into the reminder once
+// breached. Steps 2/4 (Reference Check, HR BGV) sit with references/HR
+// contacts, not the candidate, so those stay internal-only regardless of
+// status — same as at_risk always staying internal-only for every step.
+const CANDIDATE_FACING_TAT_STEPS = new Set([1, 3, 5]);
+
 export function stepTatNotification(
   c: Candidate,
   req: Requisition,
   org: OrgSettings,
   step: OfferStep,
-  status: "at_risk" | "breached"
+  status: "at_risk" | "breached",
+  templates: EmailTemplateMap = {}
 ): NotificationDraft {
   const label = status === "at_risk" ? "at risk" : "breached";
+  const includeCandidate = status === "breached" && CANDIDATE_FACING_TAT_STEPS.has(step.step_number);
+
+  if (includeCandidate) {
+    const recipients = [candidateRecipient(c), recruiterRecipient(c), hrManagementRecipient(org)];
+    const template = templates.step_tat_breached_candidate_reminder;
+    if (template) {
+      const vars = { ...baseMergeVars(c, req), step_number: String(step.step_number), step_name: step.step_name };
+      return {
+        trigger_event: `step_tat_${status}`,
+        recipients,
+        subject: renderTemplate(template.subject_template, vars),
+        body: renderTemplate(template.body_template, vars),
+      };
+    }
+    return {
+      trigger_event: `step_tat_${status}`,
+      recipients,
+      subject: `Reminder — action needed on ${step.step_name}`,
+      body: `Hi ${c.name}, this is a reminder to please revert to the email we already sent you regarding Step ${step.step_number}: ${step.step_name} (${req.title}).`,
+    };
+  }
+
   return {
     trigger_event: `step_tat_${status}`,
     recipients: [recruiterRecipient(c), hrManagementRecipient(org)],
     subject: `Step ${step.step_number} (${step.step_name}) TAT ${label} — ${c.name}`,
     body: `Step ${step.step_number}: ${step.step_name} for ${c.name} (${req.title}, ${c.candidate_code}) is TAT ${label}.`,
+  };
+}
+
+// Passed a round but not the final one — fired from InterviewClearedModal's
+// "Needs another round" path, a manual recruiter action rather than a
+// candidate-record field change (there's no stage transition here, just an
+// email), so it has no automatic call site in the move_stage switch.
+export function passedNextRoundNotification(
+  c: Candidate,
+  req: Requisition,
+  currentRoundName: string,
+  nextRoundName: string,
+  templates: EmailTemplateMap = {}
+): NotificationDraft {
+  const recipients = [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c)];
+  const template = templates.passed_next_round;
+  if (template) {
+    const vars = { ...baseMergeVars(c, req), round_name: currentRoundName, next_round_name: nextRoundName };
+    return {
+      trigger_event: "passed_next_round",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
+  return {
+    trigger_event: "passed_next_round",
+    recipients,
+    subject: `You've cleared ${currentRoundName} — ${req.title}`,
+    body: `Hi ${c.name}, congratulations — you've passed ${currentRoundName} for ${req.title} (${c.candidate_code}) and have moved to ${nextRoundName}. Our recruiter will call you shortly to schedule it.`,
   };
 }
 
@@ -331,7 +674,14 @@ export function detectDocumentApprovalEvents(
     const oldDoc = oldApprovals[docType];
     const newDoc = newApprovals[docType];
     if (!newDoc) return;
-    if ((!oldDoc || oldDoc.version !== newDoc.version) && newDoc.version && newDoc.review_status === "pending") {
+    // Fires on every genuine transition INTO "Under Review" — first
+    // submission (undefined -> pending) and every resubmission after
+    // changes (changes_requested -> pending) alike. Previously this
+    // compared `version` strings, which meant resubmitting without
+    // manually bumping a version number silently skipped HR's
+    // notification — decoupled from version entirely now that version is
+    // an auto-incrementing display counter, not a user-typed value.
+    if (newDoc.doc_link && oldDoc?.review_status !== "pending" && newDoc.review_status === "pending") {
       results.push({ docType, event: "draft_uploaded" });
     }
     if (oldDoc?.review_status !== "changes_requested" && newDoc.review_status === "changes_requested") {
@@ -361,14 +711,116 @@ export interface InsertedNotification {
 }
 
 // Candidate-facing drafts (and only those — internal-only notifications have
-// no reason to wait) go into the queue for 60 minutes instead of being
+// no reason to wait) go into the queue for 15 minutes instead of being
 // logged immediately, so a mistake can still be caught. Correction emails
 // ("please disregard...") skip the queue — they're urgent by nature.
+export interface DeliveryResult {
+  attempted: boolean;
+  sent: boolean;
+}
+
+export interface OutboundSender {
+  senderName: string | null;
+  senderEncryptedToken: string;
+  senderMailboxLabel: string | null;
+}
+
+// Whoever "owns" an outbound email: the candidate's recruiter if they've
+// connected Gmail, otherwise the Common HR Mailbox if it's connected.
+// Neither connected -> null, caller stays log-only. Shared by
+// deliverNotification below and the document-generation send flow
+// (src/lib/document-generation.ts), which always sends from the Common HR
+// Mailbox but goes through the same resolution/decrypt/refresh path.
+export async function resolveOutboundSender(
+  supabase: SupabaseClient,
+  candidateId: string | null
+): Promise<OutboundSender | null> {
+  if (candidateId) {
+    const { data: candidate } = await supabase.from("candidates").select("owner_email").eq("id", candidateId).single();
+    if (candidate?.owner_email) {
+      const { data: ownerUser } = await supabase
+        .from("users")
+        .select("name, gmail_refresh_token_encrypted")
+        .eq("email", candidate.owner_email)
+        .maybeSingle();
+      if (ownerUser?.gmail_refresh_token_encrypted) {
+        return {
+          senderName: ownerUser.name,
+          senderEncryptedToken: ownerUser.gmail_refresh_token_encrypted,
+          senderMailboxLabel: candidate.owner_email,
+        };
+      }
+    }
+  }
+
+  const { data: orgRow } = await supabase
+    .from("org_settings")
+    .select("common_hr_mailbox_name, common_hr_mailbox_email, common_hr_gmail_refresh_token_encrypted")
+    .eq("id", "default")
+    .single();
+  if (orgRow?.common_hr_gmail_refresh_token_encrypted) {
+    return {
+      senderName: orgRow.common_hr_mailbox_name || "Redrob HR",
+      senderEncryptedToken: orgRow.common_hr_gmail_refresh_token_encrypted,
+      senderMailboxLabel: orgRow.common_hr_mailbox_email,
+    };
+  }
+
+  return null;
+}
+
+// Attempts a real Gmail send for one notification row — entirely gated
+// behind org_settings.live_sending_enabled, so this is a no-op (behaves
+// exactly like the log-only Phase 2-3 behavior) until that's turned on.
+export async function deliverNotification(
+  supabase: SupabaseClient,
+  notification: { id: string; candidate_id: string | null; recipients: NotificationRecipient[]; subject: string; body: string },
+  org: OrgSettings
+): Promise<DeliveryResult> {
+  if (!org.live_sending_enabled) return { attempted: false, sent: false };
+
+  const sender = await resolveOutboundSender(supabase, notification.candidate_id);
+  if (!sender) return { attempted: false, sent: false };
+
+  try {
+    const refreshToken = decryptToken(sender.senderEncryptedToken);
+    const { access_token } = await refreshAccessToken(refreshToken);
+
+    const emails = notification.recipients.filter((r) => r.email).map((r) => r.email as string);
+    const candidateEmail = notification.recipients.find((r) => r.role === "Candidate")?.email;
+    const to = candidateEmail ? [candidateEmail] : emails.slice(0, 1);
+    const cc = emails.filter((e) => !to.includes(e));
+
+    const { messageId } = await sendGmailMessage({
+      accessToken: access_token,
+      fromLabel: sender.senderName ?? "Redrob ATS",
+      to,
+      cc,
+      subject: notification.subject,
+      body: notification.body,
+    });
+
+    await supabase
+      .from("notifications")
+      .update({ sender_mailbox: sender.senderMailboxLabel, gmail_message_id: messageId })
+      .eq("id", notification.id);
+
+    return { attempted: true, sent: true };
+  } catch (err) {
+    await supabase
+      .from("notifications")
+      .update({ status: "failed", cancel_reason: err instanceof Error ? err.message : "Send failed" })
+      .eq("id", notification.id);
+    return { attempted: true, sent: false };
+  }
+}
+
 export async function insertNotifications(
   supabase: SupabaseClient,
   drafts: NotificationDraft[],
   requisitionId: string | null,
-  candidateId: string | null
+  candidateId: string | null,
+  org?: OrgSettings
 ): Promise<InsertedNotification[]> {
   if (drafts.length === 0) return [];
   const now = new Date();
@@ -387,7 +839,21 @@ export async function insertNotifications(
       is_correction: d.isCorrection ?? false,
     };
   });
-  await supabase.from("notifications").insert(rows);
+
+  if (org) {
+    // Immediate (non-delayed) rows can be delivered right away; delayed
+    // candidate-facing ones wait for processDuePendingNotifications.
+    const { data: inserted } = await supabase
+      .from("notifications")
+      .insert(rows)
+      .select("id, candidate_id, recipients, subject, body, status");
+    for (const row of inserted ?? []) {
+      if (row.status === "sent") await deliverNotification(supabase, row, org);
+    }
+  } else {
+    await supabase.from("notifications").insert(rows);
+  }
+
   return drafts.map((draft, i) => ({ draft, pending: rows[i].status === "pending" }));
 }
 
@@ -401,7 +867,8 @@ export async function sweepStepTatBreaches(
   supabase: SupabaseClient,
   candidates: Candidate[],
   requisitionById: Map<string, Requisition>,
-  org: OrgSettings
+  org: OrgSettings,
+  templates: EmailTemplateMap = {}
 ): Promise<void> {
   for (const candidate of candidates) {
     if (candidate.status !== "active") continue;
@@ -416,7 +883,7 @@ export async function sweepStepTatBreaches(
       if (step.status !== "in_progress") return step;
       const computed = computeStepTatStatus(step);
       if ((computed === "at_risk" || computed === "breached") && step.last_notified_tat_status !== computed) {
-        const draft = stepTatNotification(candidate, requisition, org, step, computed);
+        const draft = stepTatNotification(candidate, requisition, org, step, computed, templates);
         drafts.push(draft);
         auditLog = appendAudit(auditLog, "System", "Notification logged", `${draft.subject} → ${recipientsSummary(draft.recipients)}`);
         changed = true;
@@ -427,7 +894,7 @@ export async function sweepStepTatBreaches(
 
     if (changed) {
       await supabase.from("candidates").update({ offer_steps: updatedSteps, audit_log: auditLog }).eq("id", candidate.id);
-      await insertNotifications(supabase, drafts, candidate.requisition_id, candidate.id);
+      await insertNotifications(supabase, drafts, candidate.requisition_id, candidate.id, org);
     }
   }
 }
@@ -488,7 +955,8 @@ export type RestoreCorrectionResult =
 export async function handleRestoreCorrection(
   supabase: SupabaseClient,
   candidate: Candidate,
-  requisition: Requisition
+  requisition: Requisition,
+  templates: EmailTemplateMap = {}
 ): Promise<RestoreCorrectionResult> {
   const { data } = await supabase
     .from("notifications")
@@ -510,33 +978,39 @@ export async function handleRestoreCorrection(
   }
 
   if (data.status === "sent") {
-    return { kind: "corrected", draft: rejectionDisregardNotification(candidate, requisition) };
+    return { kind: "corrected", draft: rejectionDisregardNotification(candidate, requisition, templates) };
   }
 
   return { kind: "none" };
 }
 
-// Processes every notification whose 60-minute (or immediate) window has
+// Processes every notification whose 15-minute (or immediate) window has
 // elapsed. Called both by the secured worker endpoint an external scheduler
 // pings every few minutes, AND opportunistically on board page load (same
 // belt-and-suspenders pattern as sweepStepTatBreaches) so testing isn't
 // blocked on the external scheduler being configured yet.
 //
-// Gmail sending isn't wired up yet (that's the rest of this phase) — for
-// now, "sending" just means resolving the row to 'sent' the same way
-// Phase 2-3 always worked (logged, not actually emailed). Once
-// resolveSenderAndSend exists, this is the one place that needs to change.
-export async function processDuePendingNotifications(supabase: SupabaseClient): Promise<{ processed: number }> {
+// Attempts a real Gmail send via deliverNotification (gated behind
+// org_settings.live_sending_enabled) before marking the row resolved — a
+// failed send is left as 'failed' (deliverNotification's own doing)
+// instead of being marked 'sent' like everything else.
+export async function processDuePendingNotifications(
+  supabase: SupabaseClient,
+  org: OrgSettings
+): Promise<{ processed: number }> {
   const { data: due } = await supabase
     .from("notifications")
-    .select("id, candidate_id, subject")
+    .select("id, candidate_id, recipients, subject, body")
     .eq("status", "pending")
     .lte("scheduled_send_at", new Date().toISOString());
 
   if (!due || due.length === 0) return { processed: 0 };
 
   for (const notif of due) {
-    await supabase.from("notifications").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", notif.id);
+    const result = await deliverNotification(supabase, notif, org);
+    if (!result.attempted || result.sent) {
+      await supabase.from("notifications").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", notif.id);
+    }
 
     if (notif.candidate_id) {
       const { data: candidate } = await supabase
@@ -545,7 +1019,8 @@ export async function processDuePendingNotifications(supabase: SupabaseClient): 
         .eq("id", notif.candidate_id)
         .single();
       if (candidate) {
-        const auditLog = appendAudit(candidate.audit_log, "System", "Email sent", notif.subject);
+        const label = result.attempted && !result.sent ? "Email send failed" : "Email sent";
+        const auditLog = appendAudit(candidate.audit_log, "System", label, notif.subject);
         await supabase.from("candidates").update({ audit_log: auditLog }).eq("id", notif.candidate_id);
       }
     }

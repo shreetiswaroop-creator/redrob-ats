@@ -1,4 +1,4 @@
-import { DEFAULT_STEP_TAT_HOURS, GraceExtension, OfferStep, StepTatStatus } from "./types";
+import { DEFAULT_STEP_TAT_HOURS, GraceExtension, OfferStep, Requisition, StepTatStatus } from "./types";
 
 export function effectiveTatHours(step: OfferStep): number {
   const approved = (step.grace_extensions ?? [])
@@ -30,6 +30,25 @@ export function computeStepTatStatus(step: OfferStep, now: Date = new Date()): S
   if (step.status === "complete") {
     return ratio >= 1 ? "breached" : "on_track";
   }
+  if (ratio >= 1) return "breached";
+  if (ratio >= 0.8) return "at_risk";
+  return "on_track";
+}
+
+// Position-closure TAT — a distinct, requisition-level metric from the
+// per-offer-step TAT above (that one is per-candidate/hours-based and
+// drives the dashboard's "TAT breached" tile; this one is days-based and
+// tracks how long a position has been open). Clock starts at approved_at
+// and only runs while status is "approved" — a requisition that's been
+// Fulfilled, put On Hold, or Expired isn't "breaching" a closure deadline,
+// so it reads null (not applicable) rather than frozen mid-ratio.
+export function computeClosureTatStatus(requisition: Requisition, now: Date = new Date()): StepTatStatus | null {
+  if (requisition.status !== "approved" || !requisition.approved_at) return null;
+
+  const elapsedDays = (now.getTime() - new Date(requisition.approved_at).getTime()) / (1000 * 60 * 60 * 24);
+  const totalDays = requisition.closure_tat_days;
+  const ratio = totalDays > 0 ? elapsedDays / totalDays : 0;
+
   if (ratio >= 1) return "breached";
   if (ratio >= 0.8) return "at_risk";
   return "on_track";

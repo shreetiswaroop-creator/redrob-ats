@@ -1,35 +1,44 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Candidate, PendingEmailInfo, Requisition, RequisitionStatus, Stage } from "@/lib/types";
+import { useSearchParams } from "next/navigation";
+import { Candidate, CustomFieldDefinition, PendingEmailInfo, Requisition, RequisitionStatus, RequisitionUrgency, Stage } from "@/lib/types";
 import { KanbanBoard } from "./KanbanBoard";
 import { NewRequisitionModal } from "./NewRequisitionModal";
-import { NewCandidateModal } from "./NewCandidateModal";
 import { CandidateDetailPanel } from "./CandidateDetailPanel";
 import { RejectModal } from "./RejectModal";
 import { OnHoldModal } from "./OnHoldModal";
-import { OrgSettingsModal } from "./OrgSettingsModal";
+import { ConfirmMoveModal } from "./ConfirmMoveModal";
 import { api } from "@/lib/api";
 
 export function BoardApp({
   initialRequisitions,
   initialCandidates,
   pendingEmailByCandidate: initialPendingEmailByCandidate,
+  customFieldDefinitions,
 }: {
   initialRequisitions: Requisition[];
   initialCandidates: Candidate[];
   pendingEmailByCandidate: Record<string, PendingEmailInfo>;
+  customFieldDefinitions: CustomFieldDefinition[];
 }) {
   const [requisitions, setRequisitions] = useState(initialRequisitions);
   const [candidates, setCandidates] = useState(initialCandidates);
   const [pendingEmailByCandidate, setPendingEmailByCandidate] = useState(initialPendingEmailByCandidate);
   const [filterReqId, setFilterReqId] = useState<string>("all");
+  // Set via the Dashboard's "Pending your approval" tile (?status=raised) so
+  // clicking it actually jumps to those requisitions, not just a count —
+  // narrows the Requisitions column only, independent of filterReqId.
+  const searchParams = useSearchParams();
+  const [statusFilter, setStatusFilter] = useState<RequisitionStatus | null>(() => {
+    const s = searchParams.get("status");
+    return s === "raised" ? "raised" : null;
+  });
   const [showNewReq, setShowNewReq] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [addCandidateTo, setAddCandidateTo] = useState<Requisition | null>(null);
   const [openCandidate, setOpenCandidate] = useState<Candidate | null>(null);
   const [rejectDropCandidateId, setRejectDropCandidateId] = useState<string | null>(null);
   const [onHoldCandidateId, setOnHoldCandidateId] = useState<string | null>(null);
+  const [pendingMove, setPendingMove] = useState<{ candidateId: string; toStage: Stage } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // The candidates PATCH response doesn't report notification side-effects
@@ -58,14 +67,20 @@ export function BoardApp({
     });
   }
 
-  const visibleRequisitions = useMemo(
-    () => (filterReqId === "all" ? requisitions : requisitions.filter((r) => r.id === filterReqId)),
-    [requisitions, filterReqId]
-  );
-  const visibleCandidates = useMemo(
-    () => (filterReqId === "all" ? candidates : candidates.filter((c) => c.requisition_id === filterReqId)),
-    [candidates, filterReqId]
-  );
+  const visibleRequisitions = useMemo(() => {
+    let list = filterReqId === "all" ? requisitions : requisitions.filter((r) => r.id === filterReqId);
+    if (statusFilter) list = list.filter((r) => r.status === statusFilter);
+    return list;
+  }, [requisitions, filterReqId, statusFilter]);
+  const visibleCandidates = useMemo(() => {
+    // Keep in lockstep with visibleRequisitions — KanbanBoard resolves each
+    // candidate's requisition via a map built from the requisitions it's
+    // given, so a candidate whose requisition got filtered out there but not
+    // here renders with no requisition label.
+    if (filterReqId === "all" && !statusFilter) return candidates;
+    const visibleIds = new Set(visibleRequisitions.map((r) => r.id));
+    return candidates.filter((c) => visibleIds.has(c.requisition_id));
+  }, [candidates, filterReqId, statusFilter, visibleRequisitions]);
 
   function upsertCandidate(updated: Candidate) {
     setCandidates((cs) => cs.map((c) => (c.id === updated.id ? updated : c)));
@@ -75,6 +90,35 @@ export function BoardApp({
   async function handleChangeRequisitionStatus(id: string, status: RequisitionStatus, note?: string) {
     try {
       const updated = await api.setRequisitionStatus(id, status, note);
+      if (updated.archived) {
+        // Fulfilled/Expired archives the requisition (and every one of its
+        // candidates, server-side) immediately — clear both off this board
+        // right away instead of waiting for the next full page load.
+        setRequisitions((rs) => rs.filter((r) => r.id !== id));
+        setCandidates((cs) => cs.filter((c) => c.requisition_id !== id));
+      } else {
+        setRequisitions((rs) => rs.map((r) => (r.id === id ? updated : r)));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    }
+  }
+
+  async function handleChangeClosureTat(id: string, days: number) {
+    try {
+      const updated = await api.updateRequisitionClosureTat(id, days);
+      setRequisitions((rs) => rs.map((r) => (r.id === id ? updated : r)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    }
+  }
+
+  async function handleChangeRequisitionDetails(
+    id: string,
+    fields: { urgency?: RequisitionUrgency; description?: string; custom_fields?: Record<string, unknown> }
+  ) {
+    try {
+      const updated = await api.updateRequisitionDetails(id, fields);
       setRequisitions((rs) => rs.map((r) => (r.id === id ? updated : r)));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -88,6 +132,13 @@ export function BoardApp({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     }
+  }
+
+  async function handleConfirmMove() {
+    if (!pendingMove) return;
+    const { candidateId, toStage } = pendingMove;
+    setPendingMove(null);
+    await handleMoveStage(candidateId, toStage);
   }
 
   async function handleConfirmRejectDrop(reason: string) {
@@ -131,9 +182,19 @@ export function BoardApp({
 
   const rejectDropCandidate = candidates.find((c) => c.id === rejectDropCandidateId);
   const onHoldCandidate = candidates.find((c) => c.id === onHoldCandidateId);
+  const pendingMoveCandidate = pendingMove ? candidates.find((c) => c.id === pendingMove.candidateId) : undefined;
 
   return (
     <div>
+      {statusFilter === "raised" && (
+        <div className="mb-3 flex items-center justify-between gap-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+          <span>Showing only Raised requisitions — pending your approval.</span>
+          <button className="font-medium underline" onClick={() => setStatusFilter(null)}>
+            Clear filter
+          </button>
+        </div>
+      )}
+
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <select
           className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300"
@@ -143,7 +204,7 @@ export function BoardApp({
           <option value="all">All requisitions</option>
           {requisitions.map((r) => (
             <option key={r.id} value={r.id}>
-              {r.req_code} — {r.title}
+              {r.req_code} — {r.title}{r.client?.name ? ` (${r.client.name})` : ""}
             </option>
           ))}
         </select>
@@ -153,12 +214,6 @@ export function BoardApp({
             className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-400"
           >
             + New requisition
-          </button>
-          <button
-            onClick={() => setShowSettings(true)}
-            className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
-          >
-            Notification contacts
           </button>
         </div>
       </div>
@@ -177,28 +232,24 @@ export function BoardApp({
         candidates={visibleCandidates}
         pendingEmailByCandidate={pendingEmailByCandidate}
         onChangeRequisitionStatus={handleChangeRequisitionStatus}
-        onAddCandidate={(req) => setAddCandidateTo(req)}
+        onChangeClosureTat={handleChangeClosureTat}
+        onChangeRequisitionDetails={handleChangeRequisitionDetails}
         onOpenCandidate={(c) => setOpenCandidate(c)}
         onMoveStage={handleMoveStage}
+        onRequestMoveStage={(id, toStage) => setPendingMove({ candidateId: id, toStage })}
         onDropReject={(id) => setRejectDropCandidateId(id)}
         onRestore={handleRestore}
         onCancelPendingEmail={handleCancelPendingEmail}
         onSetOnHold={(id) => setOnHoldCandidateId(id)}
         onClearOnHold={handleClearOnHold}
+        customFieldDefinitions={customFieldDefinitions}
       />
 
       {showNewReq && (
         <NewRequisitionModal
           onClose={() => setShowNewReq(false)}
           onCreated={(req) => setRequisitions((rs) => [req, ...rs])}
-        />
-      )}
-
-      {addCandidateTo && (
-        <NewCandidateModal
-          requisition={addCandidateTo}
-          onClose={() => setAddCandidateTo(null)}
-          onCreated={(c) => setCandidates((cs) => [c, ...cs])}
+          customFieldDefinitions={customFieldDefinitions.filter((d) => d.entity_type === "requisition")}
         />
       )}
 
@@ -209,6 +260,7 @@ export function BoardApp({
           pendingEmail={pendingEmailByCandidate[openCandidate.id] ?? null}
           onClose={() => setOpenCandidate(null)}
           onUpdated={upsertCandidate}
+          customFieldDefinitions={customFieldDefinitions.filter((d) => d.entity_type === "candidate")}
         />
       )}
 
@@ -228,7 +280,15 @@ export function BoardApp({
         />
       )}
 
-      {showSettings && <OrgSettingsModal onClose={() => setShowSettings(false)} />}
+      {pendingMove && pendingMoveCandidate && (
+        <ConfirmMoveModal
+          candidate={pendingMoveCandidate}
+          requisition={requisitions.find((r) => r.id === pendingMoveCandidate.requisition_id)}
+          toStage={pendingMove.toStage}
+          onCancel={() => setPendingMove(null)}
+          onConfirm={handleConfirmMove}
+        />
+      )}
     </div>
   );
 }

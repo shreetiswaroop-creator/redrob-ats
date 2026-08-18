@@ -13,6 +13,7 @@ import {
   STAGE_ORDER,
   TatStatus,
 } from "./types";
+import { computeClosureTatStatus } from "./tat";
 
 export interface CountItem {
   key: string;
@@ -50,12 +51,14 @@ export interface AgingRequisitionEntry {
 
 export interface DashboardMetrics {
   openPositions: number;
+  requisitionsPendingApproval: number;
   totalRequisitions: number;
   activeCandidates: number;
   rejectedCandidates: number;
   inOfferProcess: number;
   onHoldCandidates: number;
   tatBreached: number;
+  requisitionsPastClosureTat: number;
   experiencedCandidates: number;
   fresherInternCandidates: number;
 
@@ -80,11 +83,23 @@ const AGING_THRESHOLD_DAYS = 30;
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 const OFFER_OR_LATER_STAGES = new Set<Stage>(["offer_process", "offer_accepted_completed", "handover_to_hrms"]);
 
+// Factored out so callers that only need this one breakdown (e.g. the
+// compact chart above the Kanban board) don't have to run the whole
+// dashboard-wide computation just to get it.
+export function computeCandidatesByStage(activeCandidates: Candidate[]): CountItem[] {
+  return STAGE_ORDER.map((stage: Stage) => ({
+    key: stage,
+    label: STAGE_LABELS[stage],
+    count: activeCandidates.filter((c) => c.current_stage === stage).length,
+  }));
+}
+
 export function computeDashboardMetrics(requisitions: Requisition[], candidates: Candidate[]): DashboardMetrics {
   const activeCandidatesList = candidates.filter((c) => c.status === "active");
   const rejectedCandidatesList = candidates.filter((c) => c.status === "rejected");
 
   const openPositions = requisitions.filter((r) => r.status === "approved" || r.status === "on_hold").length;
+  const requisitionsPendingApproval = requisitions.filter((r) => r.status === "raised").length;
 
   const requisitionStatusBreakdown: CountItem[] = REQUISITION_STATUS_ORDER.map((status) => ({
     key: status,
@@ -92,11 +107,7 @@ export function computeDashboardMetrics(requisitions: Requisition[], candidates:
     count: requisitions.filter((r) => r.status === status).length,
   }));
 
-  const candidatesByStage: CountItem[] = STAGE_ORDER.map((stage: Stage) => ({
-    key: stage,
-    label: STAGE_LABELS[stage],
-    count: activeCandidatesList.filter((c) => c.current_stage === stage).length,
-  }));
+  const candidatesByStage: CountItem[] = computeCandidatesByStage(activeCandidatesList);
 
   const tatOrder: TatStatus[] = ["on_track", "at_risk", "breached"];
   const tatLabels: Record<TatStatus, string> = { on_track: "On track", at_risk: "At risk", breached: "Breached" };
@@ -221,6 +232,7 @@ export function computeDashboardMetrics(requisitions: Requisition[], candidates:
 
   return {
     openPositions,
+    requisitionsPendingApproval,
     totalRequisitions: requisitions.length,
     activeCandidates: activeCandidatesList.length,
     rejectedCandidates: rejectedCandidatesList.length,
@@ -229,6 +241,10 @@ export function computeDashboardMetrics(requisitions: Requisition[], candidates:
     ).length,
     onHoldCandidates: activeCandidatesList.filter((c) => c.on_hold).length,
     tatBreached: activeCandidatesList.filter((c) => c.tat_status === "breached").length,
+    // Distinct from tatBreached above — this is the requisition-level
+    // closure TAT (days since approval vs. closure_tat_days), not the
+    // per-candidate offer-step TAT. See computeClosureTatStatus in tat.ts.
+    requisitionsPastClosureTat: requisitions.filter((r) => computeClosureTatStatus(r) === "breached").length,
     experiencedCandidates: activeCandidatesList.filter((c) => c.candidate_track === "experienced").length,
     fresherInternCandidates: activeCandidatesList.filter((c) => c.candidate_track === "fresher_intern").length,
 

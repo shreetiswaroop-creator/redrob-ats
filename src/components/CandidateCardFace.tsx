@@ -117,6 +117,15 @@ export function CandidateCardFace({
           {candidate.status === "rejected" && (
             <span className="rounded-full bg-red-100 px-2 py-0.5 font-medium text-red-700 dark:bg-red-900 dark:text-red-300">Rejected</span>
           )}
+          {candidate.consent_given ? (
+            <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
+              ✓ Consent given
+            </span>
+          ) : (
+            <span className="rounded-full bg-amber-100 px-2 py-0.5 font-medium text-amber-700 dark:bg-amber-900 dark:text-amber-300">
+              ⚠ No consent on file
+            </span>
+          )}
         </div>
         {candidate.manual_followup_note && (
           <div className="mt-2 rounded-md bg-orange-50 px-2 py-1 text-[10px] text-orange-800 dark:bg-orange-950 dark:text-orange-300">

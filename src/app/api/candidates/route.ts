@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase";
 import { getSessionUser } from "@/lib/session";
-import { defaultOfferSteps } from "@/lib/types";
+import { CustomFieldDefinition, defaultOfferSteps } from "@/lib/types";
 import { appendAudit } from "@/lib/audit";
+import { validateCustomFieldValues } from "@/lib/customFields";
 
 export async function GET(req: NextRequest) {
   const requisitionId = req.nextUrl.searchParams.get("requisition_id");
@@ -41,8 +42,61 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Requisition not found." }, { status: 404 });
   }
 
+  // Warn (don't block) when this phone/email already exists anywhere in the
+  // database — a recruiter can knowingly proceed (e.g. a legitimate
+  // reapplication to a different role) by resubmitting with
+  // confirm_duplicate: true.
+  if (!body.confirm_duplicate && (body.phone || body.personal_email)) {
+    const dupeCols = "id, candidate_code, name, requisition_id, current_stage, status, rejection_reason, on_hold, on_hold_note, created_at";
+    const dupeRows: Record<string, unknown>[] = [];
+    if (body.phone) {
+      const { data } = await supabase.from("candidates").select(dupeCols).eq("phone", body.phone);
+      if (data) dupeRows.push(...data);
+    }
+    if (body.personal_email) {
+      const { data } = await supabase.from("candidates").select(dupeCols).eq("personal_email", body.personal_email);
+      if (data) dupeRows.push(...data);
+    }
+    const dupes = Array.from(new Map(dupeRows.map((d) => [d.id as string, d])).values());
+
+    if (dupes.length > 0) {
+      const reqIds = Array.from(new Set(dupes.map((d) => d.requisition_id as string)));
+      const { data: reqRows } = await supabase.from("requisitions").select("id, req_code, title").in("id", reqIds);
+      const reqById = new Map((reqRows ?? []).map((r) => [r.id, r]));
+
+      const matches = dupes.map((d) => {
+        const req = reqById.get(d.requisition_id as string);
+        return {
+          candidate_code: d.candidate_code,
+          name: d.name,
+          requisition_title: req?.title ?? null,
+          req_code: req?.req_code ?? null,
+          shortlisted_on: d.created_at,
+          stage: d.current_stage,
+          status: d.status,
+          rejection_reason: d.rejection_reason,
+          on_hold: d.on_hold,
+          on_hold_note: d.on_hold_note,
+        };
+      });
+
+      return NextResponse.json({ error: "duplicate", duplicate: true, matches }, { status: 409 });
+    }
+  }
+
+  const { data: fieldDefs } = await supabase
+    .from("custom_field_definitions")
+    .select("*")
+    .eq("entity_type", "candidate");
+  const customFieldsResult = validateCustomFieldValues((fieldDefs as CustomFieldDefinition[]) ?? [], body.custom_fields);
+  if (!customFieldsResult.ok) {
+    return NextResponse.json({ error: customFieldsResult.error }, { status: 400 });
+  }
+
+  const { data: orgRow } = await supabase.from("org_settings").select("default_step_tat_hours").eq("id", "default").single();
+
   const candidateTrack = body.candidate_track ?? requisition.position_type;
-  const offerSteps = defaultOfferSteps().map((step) =>
+  const offerSteps = defaultOfferSteps(orgRow?.default_step_tat_hours).map((step) =>
     step.step_number === 4 && candidateTrack === "fresher_intern"
       ? { ...step, status: "na" as const }
       : step
@@ -76,6 +130,12 @@ export async function POST(req: NextRequest) {
       source: body.source || null,
       relevant_experience_years: body.relevant_experience_years ?? null,
       notes: body.notes || null,
+      linkedin_url: body.linkedin_url || null,
+      portfolio_url: body.portfolio_url || null,
+      reason_for_change: body.reason_for_change || null,
+      consent_given: !!body.consent_given,
+      consent_given_at: body.consent_given ? new Date().toISOString() : null,
+      custom_fields: customFieldsResult.cleaned,
     })
     .select()
     .single();

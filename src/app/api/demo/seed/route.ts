@@ -66,11 +66,32 @@ export async function POST(req: NextRequest) {
 
   const supabase = supabaseServer();
 
+  // client_id is required on every requisition (Section H1) — demo
+  // requisitions get their own dedicated demo client rather than being
+  // attributed to a real one, same "[DEMO]" prefix convention used for
+  // demo candidate names.
+  let demoClientId: string;
+  const { data: existingDemoClient } = await supabase.from("clients").select("id").eq("name", "[DEMO] Client Co").maybeSingle();
+  if (existingDemoClient) {
+    demoClientId = existingDemoClient.id;
+  } else {
+    const { data: createdDemoClient, error: demoClientError } = await supabase
+      .from("clients")
+      .insert({ name: "[DEMO] Client Co", created_by: session.name })
+      .select("id")
+      .single();
+    if (demoClientError || !createdDemoClient) {
+      return NextResponse.json({ error: demoClientError?.message ?? "Failed to create demo client." }, { status: 500 });
+    }
+    demoClientId = createdDemoClient.id;
+  }
+
   const { data: insertedReqs, error: reqError } = await supabase
     .from("requisitions")
     .insert(
       DEMO_REQUISITIONS.map((r) => ({
         title: r.title,
+        client_id: demoClientId,
         department: r.department,
         location: r.location,
         position_type: r.position_type,

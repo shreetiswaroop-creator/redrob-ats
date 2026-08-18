@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase";
 import { getSessionUser } from "@/lib/session";
 import { appendAudit } from "@/lib/audit";
-import { Candidate, GraceExtension, OrgSettings, Requisition, STAGE_LABELS, STAGE_ORDER, Stage } from "@/lib/types";
+import { Candidate, CustomFieldDefinition, deriveNextRoundName, GraceExtension, OrgSettings, Requisition, STAGE_LABELS, STAGE_ORDER, Stage } from "@/lib/types";
+import { validateCustomFieldValues } from "@/lib/customFields";
 import { normalizeOfferSteps, pendingGraceExtension } from "@/lib/tat";
+import { fetchDocumentTemplates } from "@/lib/document-templates";
+import { DocumentGenerationError, generateAndSendBgvDocument, generateAndSendReferenceCheckDocuments } from "@/lib/document-generation";
 import {
   EMPTY_ORG_SETTINGS,
   NotificationDraft,
@@ -12,6 +15,7 @@ import {
   detectOfferStepTransitions,
   detectStep5Completed,
   detectTatTransition,
+  fetchEmailTemplates,
   finalDetailsConfirmedNotification,
   genericStageMovedNotification,
   graceExtensionApprovedNotification,
@@ -19,9 +23,11 @@ import {
   handleBackwardMoveCorrection,
   handleRestoreCorrection,
   insertNotifications,
+  movedToScreeningNotification,
   offerAcceptedCompletedNotification,
   offerDocumentNotification,
   offerStepNotification,
+  passedNextRoundNotification,
   recipientsSummary,
   referenceExceptionApprovedNotification,
   referenceExceptionRequestedNotification,
@@ -49,12 +55,16 @@ const EDITABLE_FIELDS = [
   "source",
   "relevant_experience_years",
   "notes",
+  "linkedin_url",
+  "portfolio_url",
+  "reason_for_change",
   "interview_rounds",
   "employment_history",
   "reference_records",
   "offer_steps",
   "documents",
   "offer_document_approvals",
+  "custom_fields",
 ] as const;
 
 export async function GET(
@@ -91,9 +101,11 @@ export async function PATCH(
   }
   const candidate = existing as Candidate;
 
-  const [{ data: requisitionRow }, { data: orgSettingsRow }] = await Promise.all([
+  const [{ data: requisitionRow }, { data: orgSettingsRow }, templates, docTemplates] = await Promise.all([
     supabase.from("requisitions").select("*").eq("id", candidate.requisition_id).single(),
     supabase.from("org_settings").select("*").eq("id", "default").single(),
+    fetchEmailTemplates(supabase),
+    fetchDocumentTemplates(supabase),
   ]);
   const requisition = requisitionRow as Requisition;
   const org: OrgSettings = (orgSettingsRow as OrgSettings) ?? EMPTY_ORG_SETTINGS;
@@ -160,20 +172,24 @@ export async function PATCH(
         });
         if (step1JustInitiated) {
           update.offer_steps = newOfferSteps;
-          drafts.push(offerStepNotification(candidate, requisition, org, newOfferSteps[0], "initiated"));
+          drafts.push(offerStepNotification(candidate, requisition, org, newOfferSteps[0], "initiated", templates));
         }
+      } else if (toStage === "screening") {
+        drafts.push(movedToScreeningNotification(candidate, requisition, templates));
       } else if (toStage === "interview") {
-        drafts.push(candidateMovedInterviewNotification(candidate, requisition));
+        drafts.push(candidateMovedInterviewNotification(candidate, requisition, templates));
       } else if (toStage === "selected_awaiting_final_details") {
-        drafts.push(selectedAwaitingFinalDetailsNotification(candidate, requisition, org));
+        drafts.push(selectedAwaitingFinalDetailsNotification(candidate, requisition, org, templates));
       } else if (toStage === "handover_to_hrms") {
+        update.hrms_handover_status = "awaiting_acknowledgement";
+        update.hrms_handed_off_at = new Date().toISOString();
         drafts.push(handoverToHrmsNotification(candidate, requisition, org));
       } else if (toStage === "offer_accepted_completed") {
         // Time to Fill (dashboard) is measured from this exact moment, not
         // from current_stage — a candidate who later moves on to Handover
         // would otherwise lose the timestamp of when they actually accepted.
         if (!candidate.offer_accepted_at) update.offer_accepted_at = new Date().toISOString();
-        drafts.push(offerAcceptedCompletedNotification(candidate, requisition));
+        drafts.push(offerAcceptedCompletedNotification(candidate, requisition, templates));
       } else {
         drafts.push(genericStageMovedNotification(candidate, requisition, toStage));
       }
@@ -207,7 +223,7 @@ export async function PATCH(
         final_benefits: final_benefits || null,
         final_notes: final_notes || null,
       };
-      drafts.push(finalDetailsConfirmedNotification(candidateWithFinalDetails, requisition, org));
+      drafts.push(finalDetailsConfirmedNotification(candidateWithFinalDetails, requisition, org, templates));
       break;
     }
 
@@ -222,7 +238,7 @@ export async function PATCH(
         rejection_reason: reason,
         rejected_at: new Date().toISOString(),
       };
-      drafts.push(rejectedNotification(candidate, requisition, reason));
+      drafts.push(rejectedNotification(candidate, requisition, reason, templates));
       break;
     }
 
@@ -237,7 +253,7 @@ export async function PATCH(
         stage_entered_at: new Date().toISOString(),
       };
 
-      const correction = await handleRestoreCorrection(supabase, candidate, requisition);
+      const correction = await handleRestoreCorrection(supabase, candidate, requisition, templates);
       let auditLog = appendAudit(
         candidate.audit_log,
         actor,
@@ -250,6 +266,35 @@ export async function PATCH(
         drafts.push(correction.draft);
       }
       update.audit_log = auditLog;
+      break;
+    }
+
+    case "revoke": {
+      if (!candidate.archived) {
+        return NextResponse.json({ error: "Candidate is not archived." }, { status: 400 });
+      }
+      if (candidate.status === "rejected") {
+        return NextResponse.json({ error: "Rejected candidates cannot be revoked." }, { status: 400 });
+      }
+      const revokeRequisitionId = (body.requisition_id as string | undefined) || candidate.requisition_id;
+      const movedToDifferentReq = revokeRequisitionId !== candidate.requisition_id;
+      update = {
+        archived: false,
+        archived_at: null,
+        archived_reason: null,
+        // A revoked candidate re-enters fresh, not wherever they were
+        // archived from — otherwise they'd pop back into e.g. Interview
+        // Round(s) on a stale requisition instead of being reconsidered.
+        requisition_id: revokeRequisitionId,
+        current_stage: "sourcing",
+        stage_entered_at: new Date().toISOString(),
+        audit_log: appendAudit(
+          candidate.audit_log,
+          actor,
+          "Revoked from archive",
+          movedToDifferentReq ? `Reconsidered for a different requisition — back in Sourcing` : "Available for reconsideration — back in Sourcing"
+        ),
+      };
       break;
     }
 
@@ -314,12 +359,21 @@ export async function PATCH(
     }
 
     case "decide_reference_exception": {
+      if (session.role !== "hr_management") {
+        return NextResponse.json({ error: "Only HR Management can decide a 2-reference exception." }, { status: 403 });
+      }
       const decision = body.decision as "approved" | "denied" | undefined;
       if (decision !== "approved" && decision !== "denied") {
         return NextResponse.json({ error: "Decision must be 'approved' or 'denied'." }, { status: 400 });
       }
       if (candidate.reference_exception.status !== "pending") {
         return NextResponse.json({ error: "No pending reference exception to decide on." }, { status: 400 });
+      }
+      if (candidate.reference_exception.requested_by === actor) {
+        return NextResponse.json(
+          { error: "You requested this exception — another HR Management account needs to decide it." },
+          { status: 403 }
+        );
       }
       update = {
         reference_exception: {
@@ -376,6 +430,9 @@ export async function PATCH(
     }
 
     case "decide_grace_extension": {
+      if (session.role !== "hr_management") {
+        return NextResponse.json({ error: "Only HR Management can decide a grace extension." }, { status: 403 });
+      }
       const stepNumber = Number(body.step_number);
       const decision = body.decision as "approved" | "denied" | undefined;
       const step = candidate.offer_steps.find((s) => s.step_number === stepNumber);
@@ -388,6 +445,12 @@ export async function PATCH(
       const pending = pendingGraceExtension(step);
       if (!pending) {
         return NextResponse.json({ error: "No pending grace extension on this step." }, { status: 400 });
+      }
+      if (pending.requested_by === actor) {
+        return NextResponse.json(
+          { error: "You requested this extension — another HR Management account needs to decide it." },
+          { status: 403 }
+        );
       }
       const decidedExtension: GraceExtension = {
         ...pending,
@@ -429,6 +492,18 @@ export async function PATCH(
         return NextResponse.json({ error: "No editable fields provided." }, { status: 400 });
       }
 
+      if ("custom_fields" in fields) {
+        const { data: fieldDefs } = await supabase
+          .from("custom_field_definitions")
+          .select("*")
+          .eq("entity_type", "candidate");
+        const result = validateCustomFieldValues((fieldDefs as CustomFieldDefinition[]) ?? [], fields.custom_fields);
+        if (!result.ok) {
+          return NextResponse.json({ error: result.error }, { status: 400 });
+        }
+        update.custom_fields = result.cleaned;
+      }
+
       if ("offer_steps" in fields) {
         const normalizedSteps = normalizeOfferSteps(candidate.offer_steps, fields.offer_steps);
 
@@ -456,14 +531,61 @@ export async function PATCH(
         }
 
         update.offer_steps = normalizedSteps;
-        for (const { step, transition } of detectOfferStepTransitions(candidate.offer_steps, normalizedSteps)) {
-          drafts.push(offerStepNotification(candidate, requisition, org, step, transition));
+        const stepTransitions = detectOfferStepTransitions(candidate.offer_steps, normalizedSteps);
+        for (const { step, transition } of stepTransitions) {
+          drafts.push(offerStepNotification(candidate, requisition, org, step, transition, templates));
         }
+
+        // Document-generation engine (PRD §7.5, §7.7) — Step 2 generates and
+        // sends one reference-check document per reference; Step 4 generates
+        // and sends the HR BGV document (Professional track only). Both read
+        // directly from employment_history/reference_records already on the
+        // card — no separate data-entry step. See src/lib/document-generation.ts.
+        const step2Initiated = stepTransitions.some((t) => t.step.step_number === 2 && t.transition === "initiated");
+        if (step2Initiated) {
+          const { result: newReferenceRecords, auditEntries } = await generateAndSendReferenceCheckDocuments(
+            supabase,
+            candidate,
+            requisition,
+            org,
+            templates,
+            docTemplates,
+            actor
+          );
+          update.reference_records = newReferenceRecords;
+          update.audit_log = [...((update.audit_log as Candidate["audit_log"]) ?? candidate.audit_log), ...auditEntries];
+        }
+
+        const step4Initiated = stepTransitions.some((t) => t.step.step_number === 4 && t.transition === "initiated");
+        if (step4Initiated) {
+          try {
+            const { result: bgvResult, auditEntries } = await generateAndSendBgvDocument(
+              supabase,
+              candidate,
+              requisition,
+              org,
+              templates,
+              docTemplates,
+              actor
+            );
+            if (bgvResult.pathname) {
+              update.bgv_document_pathname = bgvResult.pathname;
+              update.bgv_document_filename = bgvResult.filename;
+            }
+            update.audit_log = [...((update.audit_log as Candidate["audit_log"]) ?? candidate.audit_log), ...auditEntries];
+          } catch (err) {
+            if (err instanceof DocumentGenerationError) {
+              return NextResponse.json({ error: err.message }, { status: 400 });
+            }
+            throw err;
+          }
+        }
+
         if (detectStep5Completed(candidate.offer_steps, normalizedSteps)) {
           update.current_stage = "offer_accepted_completed";
           update.stage_entered_at = new Date().toISOString();
           if (!candidate.offer_accepted_at) update.offer_accepted_at = new Date().toISOString();
-          drafts.push(offerAcceptedCompletedNotification(candidate, requisition));
+          drafts.push(offerAcceptedCompletedNotification(candidate, requisition, templates));
         }
       }
 
@@ -472,7 +594,8 @@ export async function PATCH(
           candidate.offer_document_approvals,
           fields.offer_document_approvals
         )) {
-          drafts.push(offerDocumentNotification(candidate, requisition, org, docType, event));
+          const docLink = fields.offer_document_approvals[docType]?.doc_link;
+          drafts.push(offerDocumentNotification(candidate, requisition, org, docType, event, templates, docLink));
         }
       }
 
@@ -483,7 +606,54 @@ export async function PATCH(
         }
       }
 
-      update.audit_log = appendAudit(candidate.audit_log, actor, "Updated fields", changedKeys.join(", "));
+      // Append onto update.audit_log if the document-generation branch above
+      // already started building one this request — starting fresh from
+      // candidate.audit_log here would silently discard those entries.
+      update.audit_log = appendAudit(
+        (update.audit_log as Candidate["audit_log"]) ?? candidate.audit_log,
+        actor,
+        "Updated fields",
+        changedKeys.join(", ")
+      );
+      break;
+    }
+
+    case "notify_next_round": {
+      const roundName = body.round_name as string | undefined;
+      if (!roundName || !roundName.trim()) {
+        return NextResponse.json({ error: "A round name is required." }, { status: 400 });
+      }
+      const nextRoundName = deriveNextRoundName(roundName);
+      drafts.push(passedNextRoundNotification(candidate, requisition, roundName, nextRoundName, templates));
+      update = {
+        audit_log: appendAudit(candidate.audit_log, actor, "Notified candidate — needs another round", `${roundName} → ${nextRoundName}`),
+      };
+      break;
+    }
+
+    case "mark_hrms_acknowledged": {
+      if (session.role !== "hr_management") {
+        return NextResponse.json({ error: "Only HR Management can acknowledge an HRMS handover." }, { status: 403 });
+      }
+      if (candidate.hrms_handover_status !== "awaiting_acknowledgement") {
+        return NextResponse.json({ error: "No pending HRMS handover to acknowledge." }, { status: 400 });
+      }
+      update = {
+        hrms_handover_status: "acknowledged",
+        hrms_acknowledged_at: new Date().toISOString(),
+        audit_log: appendAudit(candidate.audit_log, actor, "Acknowledged HRMS handover"),
+      };
+      break;
+    }
+
+    case "add_note": {
+      const text = (body.text as string | undefined)?.trim();
+      if (!text) {
+        return NextResponse.json({ error: "Note text is required." }, { status: 400 });
+      }
+      update = {
+        candidate_notes: [...candidate.candidate_notes, { author: actor, text, created_at: new Date().toISOString() }],
+      };
       break;
     }
 
@@ -531,7 +701,7 @@ export async function PATCH(
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  await insertNotifications(supabase, drafts, candidate.requisition_id, id);
+  await insertNotifications(supabase, drafts, candidate.requisition_id, id, org);
 
   return NextResponse.json(data);
 }

@@ -13,14 +13,33 @@ export async function DELETE(req: NextRequest) {
 
   const supabase = supabaseServer();
 
-  // Clean up any resumes uploaded onto demo candidates before deleting rows.
+  // Clean up every blob a demo candidate could reference before deleting the
+  // rows — once the row is gone, nothing in the database points at these
+  // files anymore and they'd otherwise sit in Blob storage forever.
   const { data: demoCandidates } = await supabase
     .from("candidates")
-    .select("id, resume_pathname")
+    .select(
+      "id, resume_pathname, photo_pathname, education_proof_pathname, id_proof_pathname, salary_slip_pathname, bgv_document_pathname, reference_records, offer_document_approvals"
+    )
     .eq("is_demo", true);
-  const pathnames = ((demoCandidates as Pick<Candidate, "id" | "resume_pathname">[]) ?? [])
-    .map((c) => c.resume_pathname)
-    .filter((p): p is string => !!p);
+  const pathnames: string[] = [];
+  for (const c of (demoCandidates as Candidate[]) ?? []) {
+    for (const p of [
+      c.resume_pathname,
+      c.photo_pathname,
+      c.education_proof_pathname,
+      c.id_proof_pathname,
+      c.salary_slip_pathname,
+      c.bgv_document_pathname,
+    ]) {
+      if (p) pathnames.push(p);
+    }
+    for (const ref of c.reference_records ?? []) {
+      if (ref.document_pathname) pathnames.push(ref.document_pathname);
+    }
+    const finalPdfPathname = c.offer_document_approvals?.employee_agreement?.final_pdf_pathname;
+    if (finalPdfPathname) pathnames.push(finalPdfPathname);
+  }
   if (pathnames.length > 0) {
     await del(pathnames).catch(() => {});
   }

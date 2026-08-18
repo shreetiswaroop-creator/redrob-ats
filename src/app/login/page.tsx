@@ -49,7 +49,7 @@ function LoginForm() {
         className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-700 dark:bg-slate-800"
       >
         <div className="mb-6">
-          <RedrobLogo />
+          <RedrobLogo size="lg" />
         </div>
         <h1 className="mb-1 text-xl font-semibold text-slate-900 dark:text-slate-100">Sign in</h1>
         <p className="mb-6 text-sm text-slate-500 dark:text-slate-400">Use your account to continue to the ATS.</p>
