@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useActor } from "@/lib/actor-context";
 import { ChangePasswordModal } from "./ChangePasswordModal";
+import { REPLAY_TOUR_EVENT } from "./OnboardingTour";
 
 export function ActorBar() {
   const { user } = useActor();
@@ -55,6 +56,12 @@ export function ActorBar() {
         </button>
         <button onClick={handleLogout} disabled={loggingOut} className="underline hover:text-slate-700 dark:hover:text-slate-200">
           {loggingOut ? "Logging out…" : "Log out"}
+        </button>
+        <button
+          onClick={() => window.dispatchEvent(new CustomEvent(REPLAY_TOUR_EVENT))}
+          className="underline hover:text-slate-700 dark:hover:text-slate-200"
+        >
+          Replay tour
         </button>
       </div>
 

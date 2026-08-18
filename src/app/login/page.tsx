@@ -2,6 +2,7 @@
 
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { RedrobLogo } from "@/components/RedrobLogo";
 
@@ -71,6 +72,12 @@ function LoginForm() {
           placeholder="Password"
           className={inputClass}
         />
+
+        <div className="-mt-1 mb-3 text-right">
+          <Link href="/forgot-password" className="text-xs text-slate-500 hover:underline dark:text-slate-400">
+            Forgot password?
+          </Link>
+        </div>
 
         {error && <p className="mb-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
 

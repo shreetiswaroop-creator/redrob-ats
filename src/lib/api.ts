@@ -1,4 +1,5 @@
 import { Candidate, CandidateDuplicateMatch, Client, CustomFieldDefinition, CustomFieldEntityType, DocumentTemplate, EmailTemplate, Interview, InterviewMode, Panelist, PendingEmailInfo, Requisition } from "./types";
+import { PendingApprovalItem } from "./pendingApprovals";
 
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -398,5 +399,9 @@ export const api = {
       await handle<{ ok: true }>(r);
       return { deleted: true as const };
     });
+  },
+
+  listPendingApprovals() {
+    return fetch("/api/pending-approvals").then((r) => handle<{ items: PendingApprovalItem[] }>(r));
   },
 };

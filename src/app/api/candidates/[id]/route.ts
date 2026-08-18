@@ -594,8 +594,12 @@ export async function PATCH(
           candidate.offer_document_approvals,
           fields.offer_document_approvals
         )) {
-          const docLink = fields.offer_document_approvals[docType]?.doc_link;
-          drafts.push(offerDocumentNotification(candidate, requisition, org, docType, event, templates, docLink));
+          const doc = fields.offer_document_approvals[docType];
+          // Stamped here (not read back from the client) so the Approvals
+          // page's "how long has this been waiting" figure can't be spoofed
+          // or accidentally skipped by whatever the recruiter's request sent.
+          if (event === "draft_uploaded" && doc) doc.submitted_at = new Date().toISOString();
+          drafts.push(offerDocumentNotification(candidate, requisition, org, docType, event, templates, doc?.doc_link));
         }
       }
 

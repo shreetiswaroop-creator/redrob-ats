@@ -1,11 +1,22 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useActor } from "@/lib/actor-context";
 import { UserRole } from "@/lib/types";
 import { RedrobLogo } from "./RedrobLogo";
 import { ActorBar } from "./ActorBar";
+
+const COLLAPSE_STORAGE_KEY = "ats_sidebar_collapsed";
+
+function ChevronIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7.5 2.5 3.5 6l4 3.5" />
+    </svg>
+  );
+}
 
 function PipelineIcon() {
   return (
@@ -44,6 +55,16 @@ function BellIcon() {
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
       <path d="M4 7a5 5 0 0 1 10 0c0 4 1.5 5 1.5 5h-13S4 11 4 7Z" />
       <path d="M7.5 15a1.5 1.5 0 0 0 3 0" />
+    </svg>
+  );
+}
+
+function ApprovalsIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5.5 2.5h7a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1h1" />
+      <rect x="6.5" y="1.5" width="5" height="2.5" rx="0.7" />
+      <path d="M6 10.5l1.8 1.8L12.5 8" />
     </svg>
   );
 }
@@ -110,31 +131,190 @@ function SettingsIcon() {
   );
 }
 
-const NAV_ITEMS: { href: string; label: string; icon: () => React.JSX.Element; roles: UserRole[] | null }[] = [
-  { href: "/", label: "Dashboard", icon: DashboardIcon, roles: null },
-  { href: "/pipeline", label: "Candidate Pipeline", icon: PipelineIcon, roles: null },
-  { href: "/candidates", label: "Candidates", icon: UserPlusIcon, roles: null },
-  { href: "/interviews", label: "Interviews", icon: CalendarIcon, roles: null },
-  { href: "/archive", label: "Archive", icon: ArchiveIcon, roles: null },
-  { href: "/notifications", label: "Notifications log", icon: BellIcon, roles: null },
-  { href: "/my-performance", label: "My Performance", icon: TargetIcon, roles: null },
-  { href: "/recruiter-comparison", label: "Recruiter Comparison", icon: ScaleIcon, roles: ["hr_management"] },
-  { href: "/document-templates", label: "Document Templates", icon: DocumentTemplatesIcon, roles: ["hr_management"] },
-  { href: "/settings", label: "Settings", icon: SettingsIcon, roles: ["hr_management"] },
+// Single source of truth for both the sidebar's hover tooltips and the
+// onboarding tour's step content (OnboardingTour.tsx) — one description per
+// nav item, written once instead of duplicated between the two.
+//
+// Ordered by actual workflow sequence rather than build order: Candidates
+// (where you add someone) comes before Candidate Pipeline (where you track
+// them); Notifications log sits at the end of the regular list since it's a
+// log checked occasionally, not a daily page; Settings stays last as the one
+// purely administrative item.
+export const NAV_ITEMS: {
+  href: string;
+  label: string;
+  icon: () => React.JSX.Element;
+  roles: UserRole[] | null;
+  description: string;
+}[] = [
+  {
+    href: "/",
+    label: "Dashboard",
+    icon: DashboardIcon,
+    roles: null,
+    description: "A live snapshot of your hiring pipeline — key metrics, charts, and what needs attention.",
+  },
+  {
+    href: "/approvals",
+    label: "Approvals",
+    icon: ApprovalsIcon,
+    roles: ["hr_management"],
+    description: "Everything waiting on HR Management in one place — requisition approvals, reference exceptions, grace extensions, and offer document reviews.",
+  },
+  {
+    href: "/candidates",
+    label: "Candidates",
+    icon: UserPlusIcon,
+    roles: null,
+    description: "Shortlist a new candidate against an open requisition.",
+  },
+  {
+    href: "/pipeline",
+    label: "Candidate Pipeline",
+    icon: PipelineIcon,
+    roles: null,
+    description: "The board where requisitions and candidates move through every stage, from Sourcing to Handover.",
+  },
+  {
+    href: "/interviews",
+    label: "Interviews",
+    icon: CalendarIcon,
+    roles: null,
+    description: "Schedule interviews and see the week's calendar across all panelists.",
+  },
+  {
+    href: "/archive",
+    label: "Archive",
+    icon: ArchiveIcon,
+    roles: null,
+    description: "Positions and candidates that are fulfilled, expired, or closed.",
+  },
+  {
+    href: "/my-performance",
+    label: "My Performance",
+    icon: TargetIcon,
+    roles: null,
+    description: "Your own recruiting metrics — pipeline, time-to-fill, offer acceptance, and more.",
+  },
+  {
+    href: "/recruiter-comparison",
+    label: "Recruiter Comparison",
+    icon: ScaleIcon,
+    roles: ["hr_management"],
+    description: "Compare every recruiter's metrics side by side.",
+  },
+  {
+    href: "/document-templates",
+    label: "Document Templates",
+    icon: DocumentTemplatesIcon,
+    roles: ["hr_management"],
+    description: "Edit the Reference Check and HR Background Verification documents sent out to candidates.",
+  },
+  {
+    href: "/notifications",
+    label: "Notifications log",
+    icon: BellIcon,
+    roles: null,
+    description: "Every email the system has sent or queued, and why.",
+  },
+  {
+    href: "/settings",
+    label: "Settings",
+    icon: SettingsIcon,
+    roles: ["hr_management"],
+    description: "Org-wide configuration — accounts, contacts, TAT defaults, branding, templates, and custom fields.",
+  },
 ];
+
+// Standalone avatar + click-to-open popover shown in place of the full
+// ActorBar when the rail is collapsed — reuses ActorBar unmodified rather
+// than duplicating its gmail-status/change-password/logout logic.
+function CollapsedUserBlock() {
+  const { user } = useActor();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleOutside(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [open]);
+
+  const initial = user?.name?.trim()?.[0]?.toUpperCase() ?? "?";
+
+  return (
+    <div ref={wrapRef} className="relative flex justify-center" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={user?.name}
+        className="flex h-9 w-9 items-center justify-center rounded-full bg-indigo-600 text-sm font-semibold text-white dark:bg-indigo-500"
+      >
+        {initial}
+      </button>
+      {open && (
+        <div className="absolute bottom-0 left-full z-20 ml-2 w-56 rounded-lg border border-slate-200 bg-white p-3 shadow-lg dark:border-slate-600 dark:bg-slate-700">
+          <ActorBar />
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function Sidebar() {
   const pathname = usePathname();
   const { user } = useActor();
+  const [collapsed, setCollapsed] = useState(false);
+
+  // Read the persisted preference after mount (not in a lazy useState
+  // initializer) so the server-rendered/first-paint markup always matches —
+  // avoids a React hydration mismatch at the cost of one quick post-mount
+  // re-render, same tradeoff already accepted for dark mode elsewhere in
+  // this app.
+  useEffect(() => {
+    if (window.localStorage.getItem(COLLAPSE_STORAGE_KEY) === "true") setCollapsed(true);
+  }, []);
+
+  function toggleCollapsed() {
+    setCollapsed((prev) => {
+      const next = !prev;
+      window.localStorage.setItem(COLLAPSE_STORAGE_KEY, String(next));
+      return next;
+    });
+  }
 
   return (
-    <aside className="flex h-screen w-60 shrink-0 flex-col border-r border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
-      <div className="border-b border-slate-100 px-4 py-4 dark:border-slate-700">
-        <RedrobLogo size="lg" />
-        <p className="mt-1.5 text-xs font-medium text-slate-400 dark:text-slate-500">Applicant Tracking System</p>
+    <aside
+      className={`relative flex h-screen shrink-0 flex-col border-r border-slate-200 bg-white transition-[width] duration-300 ease-in-out dark:border-slate-700 dark:bg-slate-800 ${
+        collapsed ? "w-16" : "w-60"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={toggleCollapsed}
+        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        className="absolute -right-3 top-5 z-10 flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm hover:text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+      >
+        <span className={`flex transition-transform duration-300 ${collapsed ? "rotate-180" : ""}`}>
+          <ChevronIcon />
+        </span>
+      </button>
+
+      <div className={`border-b border-slate-100 py-4 dark:border-slate-700 ${collapsed ? "flex justify-center px-2" : "px-4"}`}>
+        {collapsed ? (
+          <RedrobLogo variant="icon" />
+        ) : (
+          <>
+            <RedrobLogo size="lg" />
+            <p className="mt-1.5 text-xs font-medium text-slate-400 dark:text-slate-500">Applicant Tracking System</p>
+          </>
+        )}
       </div>
 
-      <nav className="flex-1 space-y-1 overflow-y-auto p-3">
+      <nav className="flex-1 space-y-1 overflow-y-auto overflow-x-hidden p-3">
         {NAV_ITEMS.filter((item) => !item.roles || (user && item.roles.includes(user.role))).map((item) => {
           const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
           const Icon = item.icon;
@@ -142,21 +322,25 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
-              className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+              data-tour={item.href}
+              title={item.description}
+              className={`flex items-center gap-2.5 rounded-lg py-2 text-sm font-medium transition-colors ${
+                collapsed ? "justify-center px-0" : "px-3"
+              } ${
                 active
                   ? "bg-indigo-600 text-white dark:bg-indigo-500"
                   : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
               }`}
             >
               <Icon />
-              {item.label}
+              {!collapsed && item.label}
             </Link>
           );
         })}
       </nav>
 
-      <div className="border-t border-slate-100 p-3 dark:border-slate-700">
-        <ActorBar />
+      <div className={`border-t border-slate-100 p-3 dark:border-slate-700 ${collapsed ? "flex justify-center" : ""}`}>
+        {collapsed ? <CollapsedUserBlock /> : <ActorBar />}
       </div>
     </aside>
   );

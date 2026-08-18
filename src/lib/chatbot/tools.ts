@@ -1,7 +1,23 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { supabaseServer } from "@/lib/supabase";
-import { STAGE_LABELS, REQUISITION_STATUS_LABELS } from "@/lib/types";
+import { STAGE_LABELS, REQUISITION_STATUS_LABELS, Candidate, Requisition } from "@/lib/types";
+import { SessionPayload } from "@/lib/session";
+import { computeRecruiterMetrics, emptyRecruiterMetrics, DateRangeKey, DATE_RANGE_OPTIONS } from "@/lib/recruiterMetrics";
+
+const RANGE_KEYS = DATE_RANGE_OPTIONS.map((o) => o.key) as [DateRangeKey, ...DateRangeKey[]];
+
+async function fetchRecruiterMetricsInputs(): Promise<{ requisitions: Requisition[]; candidates: Candidate[] }> {
+  const supabase = supabaseServer();
+  const [reqRes, candRes] = await Promise.all([
+    supabase.from("requisitions").select("*"),
+    supabase.from("candidates").select("*"),
+  ]);
+  return {
+    requisitions: (reqRes.data as Requisition[]) ?? [],
+    candidates: (candRes.data as Candidate[]) ?? [],
+  };
+}
 
 const CANDIDATE_LIST_COLUMNS =
   "candidate_code, name, requisition_id, current_stage, status, priority, on_hold, on_hold_note, rejection_reason, archived, archived_reason";
@@ -210,3 +226,51 @@ export const listUpcomingInterviewsTool = tool({
     };
   },
 });
+
+// Both performance tools below are built as factories over the caller's
+// session (rather than module-level `tool()` constants like the ones above)
+// so the scoping is a closure, not a model-trusted input — the same
+// session-threading path createChatbotAgent(session) uses for both.
+
+export function createGetMyPerformanceTool(session: SessionPayload) {
+  return tool({
+    description:
+      "Get the signed-in user's own recruiter performance metrics (active pipeline size, requisitions closed, time to fill, offer acceptance rate, rejection reason by stage, TAT adherence, time to first action). Use for questions like 'how am I doing' or 'what's my offer acceptance rate.' Always returns only the caller's own numbers, regardless of any name mentioned in the question.",
+    inputSchema: z.object({
+      range: z
+        .enum(RANGE_KEYS)
+        .optional()
+        .describe("Time period for period-scoped metrics (requisitions closed, time to fill, etc). Defaults to 'all'. Current-state metrics like active pipeline size are unaffected by this."),
+    }),
+    execute: async ({ range }) => {
+      const { requisitions, candidates } = await fetchRecruiterMetricsInputs();
+      const allMetrics = computeRecruiterMetrics(requisitions, candidates, range ?? "all");
+      const mine = allMetrics.find((m) => m.owner === session.name) ?? emptyRecruiterMetrics(session.name);
+      return { metrics: mine };
+    },
+  });
+}
+
+export function createGetRecruiterComparisonTool(session: SessionPayload) {
+  return tool({
+    description:
+      "Compare performance metrics across all recruiters. Use for questions like 'who is the highest performer' or 'compare recruiter performance.' HR Management only.",
+    inputSchema: z.object({
+      range: z.enum(RANGE_KEYS).optional().describe("Time period for period-scoped metrics. Defaults to 'all'."),
+    }),
+    execute: async ({ range }) => {
+      // Enforced here, not left to the model's judgment about whether to
+      // call this tool — a recruiter calling it (however the question was
+      // phrased) always gets refused, never real data.
+      if (session.role !== "hr_management") {
+        return {
+          authorized: false,
+          note: "Not authorized: comparing recruiters is restricted to HR Management. Offer to show the caller their own performance via getMyPerformance instead.",
+        };
+      }
+      const { requisitions, candidates } = await fetchRecruiterMetricsInputs();
+      const allMetrics = computeRecruiterMetrics(requisitions, candidates, range ?? "all");
+      return { authorized: true, metrics: allMetrics };
+    },
+  });
+}

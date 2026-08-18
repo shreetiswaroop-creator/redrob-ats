@@ -432,6 +432,10 @@ export interface OfferDocumentApproval {
   doc_link: string;
   version: string;
   review_status: "pending" | "changes_requested" | "approved";
+  // Stamped server-side whenever review_status transitions into "pending"
+  // (see detectDocumentApprovalEvents' "draft_uploaded" event) — powers the
+  // "how long has this been waiting" figure in src/lib/pendingApprovals.ts.
+  submitted_at?: string;
   reviewer_comments: string;
   signature_status?: "pending" | "signed"; // employee_agreement only
   // Employee Agreement only — one field, uploaded twice: once by the

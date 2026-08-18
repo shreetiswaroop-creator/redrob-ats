@@ -1,11 +1,14 @@
 import { ToolLoopAgent, InferAgentUIMessage } from "ai";
 import { google } from "@ai-sdk/google";
+import { SessionPayload } from "@/lib/session";
 import {
   searchCandidatesTool,
   getCandidateDetailTool,
   searchRequisitionsTool,
   getPipelineSummaryTool,
   listUpcomingInterviewsTool,
+  createGetMyPerformanceTool,
+  createGetRecruiterComparisonTool,
 } from "./tools";
 
 // Read-only by design (confirmed with the user): the assistant can look
@@ -34,6 +37,8 @@ EMAILS: every candidate-facing and internal notification is logged on the Notifi
 
 ROLES: two roles exist — recruiter and HR Management. HR Management additionally sees Email Templates and Accounts pages.
 
+RECRUITER PERFORMANCE: every signed-in user can see their own performance metrics (active pipeline, requisitions closed, time to fill, offer acceptance rate, rejection breakdown by stage, TAT adherence, time to first action) via getMyPerformance — it always returns the caller's own numbers, no matter whose name is in the question. Comparing metrics ACROSS recruiters (e.g. "who's the best performer," "how does X compare to Y") is HR Management only, via getRecruiterComparison. If that tool comes back not authorized, tell the user plainly that comparison is restricted to HR Management and offer to show their own performance instead — never guess at a comparison yourself, and don't call the tool again in the same turn after a refusal.
+
 Rules for you:
 - For anything about specific candidates, requisitions, counts, or interviews, ALWAYS call a tool — never state a number or status from memory.
 - If a tool returns no match, say so plainly rather than guessing.
@@ -44,19 +49,28 @@ Rules for you:
 // Calls Google's API directly (not through Vercel AI Gateway) so this
 // doesn't require a card on file with Vercel — just a free
 // GOOGLE_GENERATIVE_AI_API_KEY from aistudio.google.com/apikey.
-export const chatbotAgent = new ToolLoopAgent({
-  // "latest" alias rather than a pinned version — gemini-2.5-flash itself
-  // was retired for new API keys/projects shortly after this was written,
-  // so pin as loosely as Google allows to avoid repeating that.
-  model: google("gemini-flash-latest"),
-  instructions: PLATFORM_KNOWLEDGE,
-  tools: {
-    searchCandidates: searchCandidatesTool,
-    getCandidateDetail: getCandidateDetailTool,
-    searchRequisitions: searchRequisitionsTool,
-    getPipelineSummary: getPipelineSummaryTool,
-    listUpcomingInterviews: listUpcomingInterviewsTool,
-  },
-});
+//
+// Built as a per-request factory (not a module-level singleton) because the
+// two performance tools must be scoped to the calling session — they're
+// constructed as closures over `session`, so there is exactly one path data
+// can flow through, never a second unscoped tool set.
+export function createChatbotAgent(session: SessionPayload) {
+  return new ToolLoopAgent({
+    // "latest" alias rather than a pinned version — gemini-2.5-flash itself
+    // was retired for new API keys/projects shortly after this was written,
+    // so pin as loosely as Google allows to avoid repeating that.
+    model: google("gemini-flash-latest"),
+    instructions: PLATFORM_KNOWLEDGE,
+    tools: {
+      searchCandidates: searchCandidatesTool,
+      getCandidateDetail: getCandidateDetailTool,
+      searchRequisitions: searchRequisitionsTool,
+      getPipelineSummary: getPipelineSummaryTool,
+      listUpcomingInterviews: listUpcomingInterviewsTool,
+      getMyPerformance: createGetMyPerformanceTool(session),
+      getRecruiterComparison: createGetRecruiterComparisonTool(session),
+    },
+  });
+}
 
-export type ChatbotUIMessage = InferAgentUIMessage<typeof chatbotAgent>;
+export type ChatbotUIMessage = InferAgentUIMessage<ReturnType<typeof createChatbotAgent>>;

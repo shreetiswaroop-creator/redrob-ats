@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import type { ChatbotUIMessage } from "@/lib/chatbot/agent";
+import { useActor } from "@/lib/actor-context";
 
 function ChatIcon() {
   return (
@@ -82,9 +83,14 @@ function toolLabel(type: string): string {
     searchRequisitions: "Searching requisitions…",
     getPipelineSummary: "Tallying the pipeline…",
     listUpcomingInterviews: "Checking scheduled interviews…",
+    getMyPerformance: "Checking your performance…",
+    getRecruiterComparison: "Comparing recruiters…",
   };
   return labels[key] ?? "Checking the database…";
 }
+
+const RECRUITER_EXAMPLE_QUESTIONS = ["How am I doing this month?", "What's my active pipeline?"];
+const HR_MANAGEMENT_EXTRA_QUESTION = "Who's the highest performer this quarter?";
 
 function MessageBubble({ message }: { message: ChatbotUIMessage }) {
   const isUser = message.role === "user";
@@ -114,6 +120,7 @@ function MessageBubble({ message }: { message: ChatbotUIMessage }) {
 }
 
 export function ChatWidget() {
+  const { user } = useActor();
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
@@ -126,11 +133,20 @@ export function ChatWidget() {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [messages, status]);
 
+  const exampleQuestions =
+    user?.role === "hr_management"
+      ? [...RECRUITER_EXAMPLE_QUESTIONS, HR_MANAGEMENT_EXTRA_QUESTION]
+      : RECRUITER_EXAMPLE_QUESTIONS;
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!input.trim()) return;
     sendMessage({ text: input });
     setInput("");
+  }
+
+  function askExample(question: string) {
+    sendMessage({ text: question });
   }
 
   return (
@@ -152,9 +168,18 @@ export function ChatWidget() {
 
           <div ref={listRef} className="flex-1 overflow-y-auto p-3">
             {messages.length === 0 && (
-              <p className="text-xs text-slate-400 dark:text-slate-500">
-                Try: &ldquo;How many candidates are in Interview Round for REQ1005?&rdquo; or &ldquo;How do I put a candidate on hold?&rdquo;
-              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {exampleQuestions.map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => askExample(q)}
+                    className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-600 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 dark:border-slate-600 dark:bg-slate-700/50 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:bg-slate-700 dark:hover:text-indigo-300"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
             )}
             {messages.map((m) => (
               <MessageBubble key={m.id} message={m} />

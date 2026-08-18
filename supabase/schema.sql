@@ -637,3 +637,15 @@ alter table custom_field_definitions enable row level security;
 
 alter table candidates add column if not exists custom_fields jsonb not null default '{}';
 alter table requisitions add column if not exists custom_fields jsonb not null default '{}';
+
+-- F6 — tracks whether a user has completed (or skipped) the onboarding tour,
+-- so it auto-shows once on first login and never again unless they replay it
+-- from the sidebar. Null means "not shown yet" — deliberately not defaulted
+-- to now(), since existing users predate this feature and should see it too.
+alter table users add column if not exists tour_completed_at timestamptz;
+
+-- Forgot-password flow. The token itself is never stored — only a SHA-256
+-- hash of it (see src/lib/password.ts) — so stolen DB access alone can't be
+-- replayed as a valid reset link. Both cleared once the reset is used.
+alter table users add column if not exists password_reset_token_hash text;
+alter table users add column if not exists password_reset_expires_at timestamptz;

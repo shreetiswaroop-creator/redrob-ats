@@ -35,7 +35,14 @@ export function BoardApp({
     return s === "raised" ? "raised" : null;
   });
   const [showNewReq, setShowNewReq] = useState(false);
-  const [openCandidate, setOpenCandidate] = useState<Candidate | null>(null);
+  // Set via the Approvals bell/page (?candidate=<id>) so a candidate-level
+  // pending item (reference exception, grace extension, offer document
+  // review) opens straight to that candidate's card — same query-param
+  // deep-link convention as statusFilter above, just keyed on candidate id.
+  const [openCandidate, setOpenCandidate] = useState<Candidate | null>(() => {
+    const candidateId = searchParams.get("candidate");
+    return candidateId ? initialCandidates.find((c) => c.id === candidateId) ?? null : null;
+  });
   const [rejectDropCandidateId, setRejectDropCandidateId] = useState<string | null>(null);
   const [onHoldCandidateId, setOnHoldCandidateId] = useState<string | null>(null);
   const [pendingMove, setPendingMove] = useState<{ candidateId: string; toStage: Stage } | null>(null);
