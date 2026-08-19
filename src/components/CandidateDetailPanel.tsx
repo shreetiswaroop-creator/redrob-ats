@@ -6,6 +6,7 @@ import { RejectModal } from "./RejectModal";
 import { OnHoldModal } from "./OnHoldModal";
 import { InterviewClearedModal } from "./InterviewClearedModal";
 import {
+  AppUser,
   Candidate,
   PendingEmailInfo,
   Requisition,
@@ -26,6 +27,7 @@ import {
   CustomFieldDefinition,
 } from "@/lib/types";
 import { api } from "@/lib/api";
+import { useActor } from "@/lib/actor-context";
 import { computeStepTatStatus, effectiveTatHours, pendingGraceExtension } from "@/lib/tat";
 import { CustomFieldsFields } from "./CustomFieldsFields";
 
@@ -108,6 +110,95 @@ function SaveButton({ onClick, saved }: { onClick: () => void; saved: boolean })
     >
       {saved ? "Saved ✓" : "Save changes"}
     </button>
+  );
+}
+
+// Owner is no longer a freeform text field — ownership changes go through
+// the reassign_owner action (validated against a real, active user, and
+// audit-logged), not an arbitrary string. hr_management sees a "Reassign"
+// control; everyone else just sees the current owner as plain text.
+function OwnerCell({ candidate, onReassigned }: { candidate: Candidate; onReassigned: (c: Candidate) => void }) {
+  const { user } = useActor();
+  const [picking, setPicking] = useState(false);
+  const [activeUsers, setActiveUsers] = useState<AppUser[] | null>(null);
+  const [selectedId, setSelectedId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function startPicking() {
+    setError(null);
+    setPicking(true);
+    if (activeUsers) return;
+    try {
+      setActiveUsers(await api.listActiveUsers());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't load users.");
+    }
+  }
+
+  async function handleSave() {
+    if (!selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await api.reassignCandidateOwner(candidate.id, selectedId);
+      onReassigned(updated);
+      setPicking(false);
+      setSelectedId("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Field label="Owner (Recruiter)">
+      <p className={`${inputClass} bg-slate-50 dark:bg-slate-900`}>{candidate.owner}</p>
+      {user?.role === "hr_management" &&
+        (picking ? (
+          <div className="mt-1.5 flex items-center gap-1.5">
+            <select
+              className={inputClass}
+              value={selectedId}
+              onChange={(e) => setSelectedId(e.target.value)}
+              disabled={!activeUsers}
+            >
+              <option value="">{activeUsers ? "Choose a new owner…" : "Loading…"}</option>
+              {activeUsers
+                ?.filter((u) => u.name !== candidate.owner)
+                .map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name}
+                  </option>
+                ))}
+            </select>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={!selectedId || busy}
+              className="shrink-0 rounded-md bg-indigo-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+            >
+              {busy ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setPicking(false);
+                setError(null);
+              }}
+              className="shrink-0 text-xs text-slate-400 hover:underline dark:text-slate-500"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={startPicking} className="mt-1 text-xs text-indigo-600 hover:underline dark:text-indigo-400">
+            Reassign
+          </button>
+        ))}
+      {error && <p className="mt-1 text-xs text-red-600 dark:text-red-400">{error}</p>}
+    </Field>
   );
 }
 
@@ -361,19 +452,15 @@ export function CandidateDetailPanel({
                 onBlur={(e) => e.target.value !== candidate.name && saveFields({ name: e.target.value })}
               />
             </Field>
-            <Field label="Owner (Recruiter)">
-              <input
-                className={inputClass}
-                defaultValue={candidate.owner}
-                onBlur={(e) => e.target.value !== candidate.owner && saveFields({ owner: e.target.value })}
-              />
-            </Field>
+            <OwnerCell
+              candidate={candidate}
+              onReassigned={(c) => {
+                setCandidate(c);
+                onUpdated(c);
+              }}
+            />
             <Field label="Owner email">
-              <input
-                className={inputClass}
-                defaultValue={candidate.owner_email ?? ""}
-                onBlur={(e) => e.target.value !== candidate.owner_email && saveFields({ owner_email: e.target.value })}
-              />
+              <p className={`${inputClass} bg-slate-50 dark:bg-slate-900`}>{candidate.owner_email ?? "—"}</p>
             </Field>
             <Field label="Phone">
               <input

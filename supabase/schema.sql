@@ -649,3 +649,10 @@ alter table users add column if not exists tour_completed_at timestamptz;
 -- replayed as a valid reset link. Both cleared once the reset is used.
 alter table users add column if not exists password_reset_token_hash text;
 alter table users add column if not exists password_reset_expires_at timestamptz;
+
+-- Deactivation replaces hard-deleting a user row: the row (and their name/
+-- email) has to keep existing so it still displays correctly as historical
+-- attribution on old audit log entries, past notifications, and any
+-- candidate record that still references them — a hard delete would turn
+-- all of that into a dangling/blank reference the moment someone left.
+alter table users add column if not exists deactivated_at timestamptz;

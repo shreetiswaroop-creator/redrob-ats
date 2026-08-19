@@ -112,6 +112,15 @@ function ScaleIcon() {
   );
 }
 
+function EmailTemplatesIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="1.5" y="3.5" width="15" height="11" rx="1.5" />
+      <path d="M2 4.5l7 5.5 7-5.5" />
+    </svg>
+  );
+}
+
 function DocumentTemplatesIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -202,6 +211,13 @@ export const NAV_ITEMS: {
     icon: ScaleIcon,
     roles: ["hr_management"],
     description: "Compare every recruiter's metrics side by side.",
+  },
+  {
+    href: "/email-templates",
+    label: "Email Templates",
+    icon: EmailTemplatesIcon,
+    roles: ["hr_management"],
+    description: "Edit the wording of every candidate and internal email the system sends.",
   },
   {
     href: "/document-templates",

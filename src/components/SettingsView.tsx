@@ -2,12 +2,11 @@
 
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AppUser, CustomFieldDefinition, EmailTemplate } from "@/lib/types";
+import { AppUser, CustomFieldDefinition } from "@/lib/types";
 import { AccountsViewClientOnly } from "./AccountsViewClientOnly";
 import { OrgContactsSection } from "./OrgContactsSection";
 import { TatDefaultsSection } from "./TatDefaultsSection";
 import { BrandingSection } from "./BrandingSection";
-import { EmailTemplatesView } from "./EmailTemplatesView";
 import { CustomFieldsSection } from "./CustomFieldsSection";
 
 const TABS = [
@@ -15,7 +14,6 @@ const TABS = [
   { key: "contacts", label: "Org Contacts" },
   { key: "tat", label: "TAT Defaults" },
   { key: "branding", label: "Branding" },
-  { key: "templates", label: "Notification Templates" },
   { key: "custom-fields", label: "Custom Fields" },
 ] as const;
 
@@ -25,13 +23,11 @@ function SettingsTabs({
   initialUsers,
   currentUserId,
   initialDemoCount,
-  initialTemplates,
   initialCustomFields,
 }: {
   initialUsers: AppUser[];
   currentUserId: string;
   initialDemoCount: number;
-  initialTemplates: EmailTemplate[];
   initialCustomFields: CustomFieldDefinition[];
 }) {
   const router = useRouter();
@@ -78,7 +74,6 @@ function SettingsTabs({
       {tab === "contacts" && <OrgContactsSection />}
       {tab === "tat" && <TatDefaultsSection />}
       {tab === "branding" && <BrandingSection />}
-      {tab === "templates" && <EmailTemplatesView initialTemplates={initialTemplates} />}
       {tab === "custom-fields" && <CustomFieldsSection initialDefinitions={initialCustomFields} />}
     </div>
   );
@@ -88,7 +83,6 @@ export function SettingsView(props: {
   initialUsers: AppUser[];
   currentUserId: string;
   initialDemoCount: number;
-  initialTemplates: EmailTemplate[];
   initialCustomFields: CustomFieldDefinition[];
 }) {
   return (

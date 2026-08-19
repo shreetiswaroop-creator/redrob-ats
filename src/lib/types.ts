@@ -68,6 +68,7 @@ export interface AppUser {
   created_by: string | null;
   gmail_email: string | null;
   gmail_connected_at: string | null;
+  deactivated_at: string | null;
 }
 
 export const STAGE_LABELS: Record<Stage, string> = {

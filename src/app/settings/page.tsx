@@ -3,7 +3,7 @@ import { supabaseServer } from "@/lib/supabase";
 import { getSessionUserFromCookies } from "@/lib/session-server";
 import { AppShell } from "@/components/AppShell";
 import { SettingsView } from "@/components/SettingsView";
-import { AppUser, CustomFieldDefinition, EmailTemplate } from "@/lib/types";
+import { AppUser, CustomFieldDefinition } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -23,16 +23,14 @@ export default async function SettingsPage() {
     { data: usersData },
     { count: demoCandidateCount },
     { count: demoRequisitionCount },
-    { data: templatesData },
     { data: customFieldsData },
   ] = await Promise.all([
     supabase
       .from("users")
-      .select("id, name, email, role, created_at, created_by, gmail_email, gmail_connected_at")
+      .select("id, name, email, role, created_at, created_by, gmail_email, gmail_connected_at, deactivated_at")
       .order("created_at", { ascending: true }),
     supabase.from("candidates").select("id", { count: "exact", head: true }).eq("is_demo", true),
     supabase.from("requisitions").select("id", { count: "exact", head: true }).eq("is_demo", true),
-    supabase.from("email_templates").select("*").order("label", { ascending: true }),
     supabase.from("custom_field_definitions").select("*").order("display_order", { ascending: true }),
   ]);
 
@@ -42,7 +40,6 @@ export default async function SettingsPage() {
         initialUsers={(usersData as AppUser[]) ?? []}
         currentUserId={session.sub}
         initialDemoCount={(demoCandidateCount ?? 0) + (demoRequisitionCount ?? 0)}
-        initialTemplates={(templatesData as EmailTemplate[]) ?? []}
         initialCustomFields={(customFieldsData as CustomFieldDefinition[]) ?? []}
       />
     </AppShell>

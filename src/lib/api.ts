@@ -1,4 +1,4 @@
-import { Candidate, CandidateDuplicateMatch, Client, CustomFieldDefinition, CustomFieldEntityType, DocumentTemplate, EmailTemplate, Interview, InterviewMode, Panelist, PendingEmailInfo, Requisition } from "./types";
+import { AppUser, Candidate, CandidateDuplicateMatch, Client, CustomFieldDefinition, CustomFieldEntityType, DocumentTemplate, EmailTemplate, Interview, InterviewMode, Panelist, PendingEmailInfo, Requisition } from "./types";
 import { PendingApprovalItem } from "./pendingApprovals";
 
 async function handle<T>(res: Response): Promise<T> {
@@ -403,5 +403,17 @@ export const api = {
 
   listPendingApprovals() {
     return fetch("/api/pending-approvals").then((r) => handle<{ items: PendingApprovalItem[] }>(r));
+  },
+
+  listActiveUsers() {
+    return fetch("/api/users").then((r) => handle<AppUser[]>(r)).then((users) => users.filter((u) => !u.deactivated_at));
+  },
+
+  reassignCandidateOwner(id: string, newOwnerId: string) {
+    return fetch(`/api/candidates/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "reassign_owner", new_owner_id: newOwnerId }),
+    }).then((r) => handle<Candidate>(r));
   },
 };

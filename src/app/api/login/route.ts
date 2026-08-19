@@ -25,6 +25,9 @@ export async function POST(req: NextRequest) {
   if (!user || !(await verifyPassword(password, user.password_hash))) {
     return NextResponse.json({ error: "Incorrect email or password." }, { status: 401 });
   }
+  if (user.deactivated_at) {
+    return NextResponse.json({ error: "This account has been deactivated. Contact HR Management." }, { status: 403 });
+  }
 
   const appUser = user as AppUser & { password_hash: string };
   const token = await createSessionToken(appUser, sessionSecret);

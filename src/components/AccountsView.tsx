@@ -1,8 +1,203 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppUser, UserRole } from "@/lib/types";
-import { Field, inputClass } from "./Modal";
+import { Field, inputClass, Modal } from "./Modal";
+
+interface OwnedCandidatePreview {
+  id: string;
+  candidate_code: string;
+  name: string;
+  requisition_id: string;
+  requisition: { req_code: string; title: string } | null;
+}
+
+// Shown when deactivating someone who still owns active candidates — a
+// single bulk "reassign all to" default, with an optional per-candidate
+// override list, so HR Management can split a caseload across two people
+// without that being the common case's extra click.
+function DeactivateFlow({
+  target,
+  otherActiveUsers,
+  onClose,
+  onDeactivated,
+}: {
+  target: AppUser;
+  otherActiveUsers: AppUser[];
+  onClose: () => void;
+  onDeactivated: (id: string) => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<OwnedCandidatePreview[] | null>(null);
+
+  const [bulkOwnerId, setBulkOwnerId] = useState("");
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const [showList, setShowList] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    fetch(`/api/users/${target.id}/active-candidates`)
+      .then((r) => r.json())
+      .then((body) => {
+        if (body.error) throw new Error(body.error);
+        setCandidates(body.candidates);
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : "Something went wrong."))
+      .finally(() => setLoading(false));
+  }, [target.id]);
+
+  function handleBulkChange(id: string) {
+    setBulkOwnerId(id);
+    setOverrides({}); // a new bulk default replaces any earlier one-off picks
+  }
+
+  async function handleConfirm() {
+    setSubmitError(null);
+    setBusy(true);
+    try {
+      const reassignments = (candidates ?? []).map((c) => ({
+        candidateId: c.id,
+        newOwnerId: overrides[c.id] ?? bulkOwnerId,
+      }));
+      const res = await fetch(`/api/users/${target.id}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reassignments }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Something went wrong.");
+      onDeactivated(target.id);
+      onClose();
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const requisitionCount = candidates ? new Set(candidates.map((c) => c.requisition_id)).size : 0;
+  const needsReassignment = (candidates?.length ?? 0) > 0;
+
+  return (
+    <Modal title={`Deactivate ${target.name}`} onClose={onClose} wide={needsReassignment}>
+      {loading ? (
+        <p className="text-sm text-slate-500 dark:text-slate-400">Checking their active candidates…</p>
+      ) : loadError ? (
+        <p className="text-sm text-red-600 dark:text-red-400">{loadError}</p>
+      ) : !needsReassignment ? (
+        <div>
+          <p className="mb-4 text-sm text-slate-600 dark:text-slate-300">
+            {target.name} doesn&apos;t own any active candidates. They&apos;ll no longer be able to log in — their name
+            stays intact on past audit log entries and notifications.
+          </p>
+          {submitError && <p className="mb-3 text-sm text-red-600 dark:text-red-400">{submitError}</p>}
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirm}
+              disabled={busy}
+              className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              {busy ? "Deactivating…" : "Confirm & Deactivate"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <p className="mb-4 text-sm text-slate-600 dark:text-slate-300">
+            <strong>{target.name}</strong> owns <strong>{candidates!.length}</strong> active candidate
+            {candidates!.length === 1 ? "" : "s"} across <strong>{requisitionCount}</strong> requisition
+            {requisitionCount === 1 ? "" : "s"}.
+          </p>
+
+          <Field label="Reassign all to:">
+            <select className={inputClass} value={bulkOwnerId} onChange={(e) => handleBulkChange(e.target.value)}>
+              <option value="">Choose a recruiter…</option>
+              {otherActiveUsers.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <button
+            type="button"
+            onClick={() => setShowList((v) => !v)}
+            className="mb-2 text-xs font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+          >
+            {showList ? "Hide" : "Show"} individual candidates
+          </button>
+
+          {showList && (
+            <div className="mb-4 max-h-64 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-700">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-700 dark:text-slate-400">
+                  <tr>
+                    <th className="px-3 py-2">Candidate</th>
+                    <th className="px-3 py-2">Requisition</th>
+                    <th className="px-3 py-2">Reassign to</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {candidates!.map((c) => (
+                    <tr key={c.id} className="border-t border-slate-100 dark:border-slate-700">
+                      <td className="px-3 py-2 text-slate-700 dark:text-slate-300">
+                        {c.name} ({c.candidate_code})
+                      </td>
+                      <td className="px-3 py-2 text-slate-500 dark:text-slate-400">
+                        {c.requisition ? `${c.requisition.req_code} — ${c.requisition.title}` : "Unknown"}
+                      </td>
+                      <td className="px-3 py-2">
+                        <select
+                          className={`${inputClass} py-1 text-xs`}
+                          value={overrides[c.id] ?? bulkOwnerId}
+                          onChange={(e) => setOverrides((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                        >
+                          <option value="">Choose a recruiter…</option>
+                          {otherActiveUsers.map((u) => (
+                            <option key={u.id} value={u.id}>
+                              {u.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {submitError && <p className="mb-3 text-sm text-red-600 dark:text-red-400">{submitError}</p>}
+
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirm}
+              disabled={busy || !bulkOwnerId || candidates!.some((c) => !(overrides[c.id] ?? bulkOwnerId))}
+              className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              {busy ? "Deactivating…" : "Confirm & Deactivate"}
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
 
 export function AccountsView({
   initialUsers,
@@ -25,6 +220,12 @@ export function AccountsView({
   const [demoBusy, setDemoBusy] = useState(false);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [demoError, setDemoError] = useState<string | null>(null);
+
+  const [deactivatingUser, setDeactivatingUser] = useState<AppUser | null>(null);
+  const [showDeactivated, setShowDeactivated] = useState(false);
+
+  const activeUsers = users.filter((u) => !u.deactivated_at);
+  const deactivatedUsers = users.filter((u) => u.deactivated_at);
 
   async function handleSeedDemo() {
     setDemoError(null);
@@ -81,16 +282,8 @@ export function AccountsView({
     }
   }
 
-  async function handleRemove(id: string) {
-    setError(null);
-    try {
-      const res = await fetch(`/api/users/${id}`, { method: "DELETE" });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? "Something went wrong.");
-      setUsers((u) => u.filter((x) => x.id !== id));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong.");
-    }
+  function handleDeactivated(id: string) {
+    setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, deactivated_at: new Date().toISOString() } : u)));
   }
 
   return (
@@ -193,7 +386,7 @@ export function AccountsView({
         </p>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+      <div className="mb-4 overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-700 dark:text-slate-400">
             <tr>
@@ -205,7 +398,7 @@ export function AccountsView({
             </tr>
           </thead>
           <tbody>
-            {users.map((u) => (
+            {activeUsers.map((u) => (
               <tr key={u.id} className="border-t border-slate-100 text-slate-700 dark:border-slate-700 dark:text-slate-300">
                 <td className="px-3 py-2">{u.name}</td>
                 <td className="px-3 py-2">{u.email}</td>
@@ -220,8 +413,8 @@ export function AccountsView({
                 </td>
                 <td className="px-3 py-2 text-right">
                   {u.id !== currentUserId && (
-                    <button onClick={() => handleRemove(u.id)} className="text-xs text-red-500 hover:underline dark:text-red-400">
-                      Remove
+                    <button onClick={() => setDeactivatingUser(u)} className="text-xs text-red-500 hover:underline dark:text-red-400">
+                      Deactivate
                     </button>
                   )}
                 </td>
@@ -230,6 +423,56 @@ export function AccountsView({
           </tbody>
         </table>
       </div>
+
+      {deactivatedUsers.length > 0 && (
+        <div className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+          <button
+            type="button"
+            onClick={() => setShowDeactivated((v) => !v)}
+            className="flex w-full items-center justify-between px-4 py-3 text-left"
+          >
+            <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+              Deactivated ({deactivatedUsers.length})
+            </h2>
+            <span className="text-xs text-slate-400 dark:text-slate-500">{showDeactivated ? "Hide" : "Show"}</span>
+          </button>
+          {showDeactivated && (
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-700 dark:text-slate-400">
+                <tr>
+                  <th className="px-3 py-2">Name</th>
+                  <th className="px-3 py-2">Email</th>
+                  <th className="px-3 py-2">Role</th>
+                  <th className="px-3 py-2">Deactivated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {deactivatedUsers.map((u) => (
+                  <tr key={u.id} className="border-t border-slate-100 text-slate-400 dark:border-slate-700 dark:text-slate-500">
+                    <td className="px-3 py-2">{u.name}</td>
+                    <td className="px-3 py-2">{u.email}</td>
+                    <td className="px-3 py-2">
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-700 dark:text-slate-400">
+                        {u.role === "hr_management" ? "HR Management" : "Recruiter"}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-xs">{new Date(u.deactivated_at as string).toLocaleDateString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {deactivatingUser && (
+        <DeactivateFlow
+          target={deactivatingUser}
+          otherActiveUsers={activeUsers.filter((u) => u.id !== deactivatingUser.id)}
+          onClose={() => setDeactivatingUser(null)}
+          onDeactivated={handleDeactivated}
+        />
+      )}
     </div>
   );
 }

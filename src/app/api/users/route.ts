@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
   const supabase = supabaseServer();
   const { data, error } = await supabase
     .from("users")
-    .select("id, name, email, role, created_at, created_by, gmail_email, gmail_connected_at")
+    .select("id, name, email, role, created_at, created_by, gmail_email, gmail_connected_at, deactivated_at")
     .order("created_at", { ascending: true });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
       role,
       created_by: session.name,
     })
-    .select("id, name, email, role, created_at, created_by, gmail_email, gmail_connected_at")
+    .select("id, name, email, role, created_at, created_by, gmail_email, gmail_connected_at, deactivated_at")
     .single();
 
   if (error) {

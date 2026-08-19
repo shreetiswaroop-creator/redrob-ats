@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase";
 import { getSessionUser } from "@/lib/session";
 import { appendAudit } from "@/lib/audit";
+import { reassignCandidateOwner } from "@/lib/candidateOwnership";
 import { Candidate, CustomFieldDefinition, deriveNextRoundName, GraceExtension, OrgSettings, Requisition, STAGE_LABELS, STAGE_ORDER, Stage } from "@/lib/types";
 import { validateCustomFieldValues } from "@/lib/customFields";
 import { normalizeOfferSteps, pendingGraceExtension } from "@/lib/tat";
@@ -40,8 +41,6 @@ const EDITABLE_FIELDS = [
   "name",
   "phone",
   "personal_email",
-  "owner",
-  "owner_email",
   "candidate_track",
   "track_override_reason",
   "hiring_manager",
@@ -335,6 +334,36 @@ export async function PATCH(
         audit_log: appendAudit(candidate.audit_log, actor, "Cleared hold"),
       };
       break;
+    }
+
+    case "reassign_owner": {
+      if (session.role !== "hr_management") {
+        return NextResponse.json({ error: "Only HR Management can reassign a candidate's owner." }, { status: 403 });
+      }
+      const newOwnerId = body.new_owner_id as string | undefined;
+      if (!newOwnerId) {
+        return NextResponse.json({ error: "A new owner is required." }, { status: 400 });
+      }
+      const { data: newOwnerUser } = await supabase
+        .from("users")
+        .select("name, email, deactivated_at")
+        .eq("id", newOwnerId)
+        .maybeSingle();
+      if (!newOwnerUser) {
+        return NextResponse.json({ error: "That user doesn't exist." }, { status: 400 });
+      }
+      if (newOwnerUser.deactivated_at) {
+        return NextResponse.json({ error: "Can't reassign to a deactivated account." }, { status: 400 });
+      }
+      if (candidate.owner === newOwnerUser.name) {
+        return NextResponse.json({ error: "Candidate is already owned by this person." }, { status: 400 });
+      }
+      // Same mechanism the bulk reassignment during user deactivation uses
+      // (src/lib/candidateOwnership.ts) — one code path, not a duplicate.
+      const result = await reassignCandidateOwner(supabase, id, newOwnerUser, actor);
+      if (!result.ok) return NextResponse.json({ error: result.error }, { status: 500 });
+      const { data: refreshed } = await supabase.from("candidates").select("*").eq("id", id).single();
+      return NextResponse.json(refreshed);
     }
 
     case "request_reference_exception": {
