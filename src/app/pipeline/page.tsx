@@ -4,7 +4,7 @@ import { BoardAppClientOnly } from "@/components/BoardAppClientOnly";
 import { AppShell } from "@/components/AppShell";
 import { Requisition, Candidate, CustomFieldDefinition, OrgSettings, PendingEmailInfo } from "@/lib/types";
 import { EMPTY_ORG_SETTINGS, fetchEmailTemplates, processDuePendingNotifications, sweepStepTatBreaches } from "@/lib/notifications";
-import { sweepOnHoldArchiving } from "@/lib/archiving";
+import { sweepCandidateOnHoldArchiving, sweepOnHoldArchiving } from "@/lib/archiving";
 import { getSessionUserFromCookies } from "@/lib/session-server";
 
 export const dynamic = "force-dynamic";
@@ -33,9 +33,12 @@ export default async function PipelinePage() {
     const org = (orgRes.data as OrgSettings) ?? EMPTY_ORG_SETTINGS;
 
     // A position left On Hold for 15+ days archives itself (and every one
-    // of its candidates) — re-fetch both afterward since this may have
-    // just removed some from the live board.
+    // of its candidates); a candidate put on hold individually (independent
+    // of their requisition's status) archives the same way on their own
+    // 15-day clock — re-fetch both afterward since either may have just
+    // removed rows from the live board.
     await sweepOnHoldArchiving(supabase, requisitions);
+    await sweepCandidateOnHoldArchiving(supabase, candidates);
     const [reqRes2, candRes2] = await Promise.all([
       supabase.from("requisitions").select("*, client:clients(name)").eq("archived", false).order("created_at", { ascending: false }),
       supabase.from("candidates").select("*").eq("archived", false).order("created_at", { ascending: false }),

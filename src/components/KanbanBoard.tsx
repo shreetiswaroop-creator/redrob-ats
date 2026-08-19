@@ -71,7 +71,9 @@ export function KanbanBoard({
       const toStage = col.key as Stage;
       const candidate = candidates.find((c) => c.id === id);
       const isForward = candidate ? STAGE_ORDER.indexOf(toStage) > STAGE_ORDER.indexOf(candidate.current_stage) : false;
-      if (isForward) {
+      if (isForward && candidate && isUnconfirmedForwardMove(candidate.current_stage, toStage)) {
+        onMoveStage(id, toStage);
+      } else if (isForward) {
         onRequestMoveStage(id, toStage);
       } else if (candidate && toStage !== candidate.current_stage) {
         onMoveStage(id, toStage);
@@ -82,6 +84,13 @@ export function KanbanBoard({
   function nextStageFor(candidate: Candidate): Stage | null {
     const idx = STAGE_ORDER.indexOf(candidate.current_stage);
     return idx >= 0 && idx < STAGE_ORDER.length - 1 ? STAGE_ORDER[idx + 1] : null;
+  }
+
+  // Sourcing -> Screening is high-volume triage (20-25 cards at once), not a
+  // meaningful decision point — skip the "are you sure" popup only for this
+  // one transition. Every other forward move keeps it.
+  function isUnconfirmedForwardMove(fromStage: Stage, toStage: Stage): boolean {
+    return fromStage === "sourcing" && toStage === "screening";
   }
 
   return (
@@ -117,7 +126,12 @@ export function KanbanBoard({
                   nextStage={nextStageFor(c)}
                   onMoveNext={() => {
                     const next = nextStageFor(c);
-                    if (next) onRequestMoveStage(c.id, next);
+                    if (!next) return;
+                    if (isUnconfirmedForwardMove(c.current_stage, next)) {
+                      onMoveStage(c.id, next);
+                    } else {
+                      onRequestMoveStage(c.id, next);
+                    }
                   }}
                   onReject={() => onDropReject(c.id)}
                   onCancelPendingEmail={(notificationId) => onCancelPendingEmail(c.id, notificationId)}

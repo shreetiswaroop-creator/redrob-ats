@@ -601,6 +601,35 @@ export function passedNextRoundNotification(
   };
 }
 
+// Fired once per candidate when a requisition's on-hold-timeout archive is
+// revoked (see the "revoke" action in src/app/api/requisitions/[id]/route.ts)
+// — every candidate archived_reason: "requisition_on_hold" gets their own
+// copy, since each is a distinct person who needs to hear the position is
+// back on.
+export function positionReopenedNotification(
+  c: Candidate,
+  req: Requisition,
+  templates: EmailTemplateMap = {}
+): NotificationDraft {
+  const recipients = [candidateRecipient(c), hiringManagerRecipient(req), recruiterRecipient(c)];
+  const template = templates.position_reopened;
+  if (template) {
+    const vars = baseMergeVars(c, req);
+    return {
+      trigger_event: "position_reopened",
+      recipients,
+      subject: renderTemplate(template.subject_template, vars),
+      body: renderTemplate(template.body_template, vars),
+    };
+  }
+  return {
+    trigger_event: "position_reopened",
+    recipients,
+    subject: `Good news — ${req.title} has reopened`,
+    body: `Hi ${c.name}, ${req.title} (${req.req_code}) was temporarily on hold and has now reopened. Please confirm you're still available to continue — our recruiter will be calling you shortly.`,
+  };
+}
+
 export function graceExtensionApprovedNotification(
   c: Candidate,
   req: Requisition,

@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase";
 import { getSessionUser } from "@/lib/session";
-import { CustomFieldDefinition, OrgSettings, Requisition, REQUISITION_STATUS_ORDER, REQUISITION_URGENCY_ORDER, RequisitionStatus } from "@/lib/types";
-import { EMPTY_ORG_SETTINGS, insertNotifications, requisitionApprovedNotification } from "@/lib/notifications";
+import { Candidate, CustomFieldDefinition, OrgSettings, Requisition, REQUISITION_STATUS_ORDER, REQUISITION_URGENCY_ORDER, RequisitionStatus } from "@/lib/types";
+import { EMPTY_ORG_SETTINGS, fetchEmailTemplates, insertNotifications, positionReopenedNotification, requisitionApprovedNotification } from "@/lib/notifications";
 import { validateCustomFieldValues } from "@/lib/customFields";
+import { appendAudit } from "@/lib/audit";
 
 // Any recruiter can move a requisition freely between all five statuses via
 // a dropdown (not a locked pipeline) — this only fires the "approved"
@@ -44,6 +45,7 @@ export async function PATCH(
         { status: 400 }
       );
     }
+    const now = new Date().toISOString();
     const { data, error } = await supabase
       .from("requisitions")
       .update({ archived: false, archived_at: null, archived_reason: null, status: "approved", on_hold_since: null })
@@ -51,6 +53,55 @@ export async function PATCH(
       .select("*, client:clients(name)")
       .single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    const requisition = data as Requisition;
+
+    // Cascade to every candidate archived specifically because THIS
+    // requisition went on hold (sweepOnHoldArchiving in src/lib/archiving.ts)
+    // — never candidates archived for any other reason (e.g. individually
+    // rejected-and-archived). Restore to their exact prior stage, not
+    // Sourcing: the sweep only ever flipped the archived flag, it never
+    // touched current_stage, so this is purely clearing that flag — contrast
+    // with the individual candidate-level "revoke" action, which deliberately
+    // does reset to Sourcing since that's a fresh reconsideration, not an
+    // interrupted-then-resumed pipeline.
+    const { data: affectedCandidates } = await supabase
+      .from("candidates")
+      .select("*")
+      .eq("requisition_id", id)
+      .eq("archived", true)
+      .eq("archived_reason", "requisition_on_hold");
+
+    if (affectedCandidates && affectedCandidates.length > 0) {
+      const [{ data: orgRow }, templates] = await Promise.all([
+        supabase.from("org_settings").select("*").eq("id", "default").single(),
+        fetchEmailTemplates(supabase),
+      ]);
+      const org = (orgRow as OrgSettings) ?? EMPTY_ORG_SETTINGS;
+
+      for (const candidate of affectedCandidates as Candidate[]) {
+        const { error: candError } = await supabase
+          .from("candidates")
+          .update({
+            archived: false,
+            archived_at: null,
+            archived_reason: null,
+            stage_entered_at: now,
+            audit_log: appendAudit(candidate.audit_log, session.name, "Position reopened", "Restored from archive — requisition came off hold"),
+          })
+          .eq("id", candidate.id);
+        // Best-effort per candidate, matching the rest of the app's
+        // convention (e.g. reference-check document sends) — one row
+        // failing shouldn't block the requisition revoke or the other
+        // candidates from being restored and notified.
+        if (candError) {
+          console.warn(`[requisitions revoke] Failed to restore candidate ${candidate.id}: ${candError.message}`);
+          continue;
+        }
+        const draft = positionReopenedNotification(candidate, requisition, templates);
+        await insertNotifications(supabase, [draft], requisition.id, candidate.id, org);
+      }
+    }
+
     return NextResponse.json(data);
   }
 

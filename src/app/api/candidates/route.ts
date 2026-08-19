@@ -47,7 +47,8 @@ export async function POST(req: NextRequest) {
   // reapplication to a different role) by resubmitting with
   // confirm_duplicate: true.
   if (!body.confirm_duplicate && (body.phone || body.personal_email)) {
-    const dupeCols = "id, candidate_code, name, requisition_id, current_stage, status, rejection_reason, on_hold, on_hold_note, created_at";
+    const dupeCols =
+      "id, candidate_code, name, requisition_id, current_stage, status, rejection_reason, on_hold, on_hold_note, archived, archived_reason, created_at";
     const dupeRows: Record<string, unknown>[] = [];
     if (body.phone) {
       const { data } = await supabase.from("candidates").select(dupeCols).eq("phone", body.phone);
@@ -67,8 +68,10 @@ export async function POST(req: NextRequest) {
       const matches = dupes.map((d) => {
         const req = reqById.get(d.requisition_id as string);
         return {
+          id: d.id,
           candidate_code: d.candidate_code,
           name: d.name,
+          requisition_id: d.requisition_id,
           requisition_title: req?.title ?? null,
           req_code: req?.req_code ?? null,
           shortlisted_on: d.created_at,
@@ -77,6 +80,8 @@ export async function POST(req: NextRequest) {
           rejection_reason: d.rejection_reason,
           on_hold: d.on_hold,
           on_hold_note: d.on_hold_note,
+          archived: d.archived,
+          archived_reason: d.archived_reason,
         };
       });
 

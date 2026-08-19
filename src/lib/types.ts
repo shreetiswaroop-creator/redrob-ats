@@ -20,10 +20,22 @@ export const REQUISITION_ARCHIVED_REASON_LABELS: Record<RequisitionArchivedReaso
   on_hold_timeout: "On Hold 15+ days",
 };
 
-// Why a candidate got archived, tied to their requisition's own archive
-// reason — only requisition_on_hold candidates get a Revoke button; the
-// other two are a closed chapter (position filled or given up on).
-export type CandidateArchivedReason = "requisition_fulfilled" | "requisition_expired" | "requisition_on_hold";
+// Why a candidate got archived. requisition_fulfilled/requisition_expired
+// track their requisition's own archive reason (a closed chapter — Revoke
+// picks a new position). requisition_on_hold/candidate_on_hold_timeout mean
+// the candidate themself was just paused — Revoke restores their exact prior
+// stage under the same requisition instead, no position picker.
+export type CandidateArchivedReason =
+  | "requisition_fulfilled"
+  | "requisition_expired"
+  | "requisition_on_hold"
+  | "candidate_on_hold_timeout";
+export const CANDIDATE_ARCHIVED_REASON_LABELS: Record<CandidateArchivedReason, string> = {
+  requisition_fulfilled: "Requisition fulfilled",
+  requisition_expired: "Requisition expired",
+  requisition_on_hold: "Requisition on hold 15+ days",
+  candidate_on_hold_timeout: "On hold 15+ days",
+};
 
 export type CandidatePriority = "P1" | "P2" | "P3";
 export const CANDIDATE_PRIORITIES: CandidatePriority[] = ["P1", "P2", "P3"];
@@ -225,6 +237,7 @@ export const EMAIL_TEMPLATE_KEYS = [
   "offer_accepted_completed_candidate",
   "rejection",
   "reconsideration",
+  "position_reopened",
 ] as const;
 export type EmailTemplateKey = (typeof EMAIL_TEMPLATE_KEYS)[number];
 
@@ -268,6 +281,7 @@ export const EMAIL_TEMPLATE_MERGE_FIELDS: Record<EmailTemplateKey, string[]> = {
   offer_accepted_completed_candidate: OFFER_STAGE_MERGE_FIELDS,
   rejection: [...BASIC_MERGE_FIELDS, "reason"],
   reconsideration: BASIC_MERGE_FIELDS,
+  position_reopened: BASIC_MERGE_FIELDS,
 };
 
 export interface EmploymentHistoryEntry {
@@ -592,9 +606,14 @@ export interface CustomFieldDefinition {
 
 // Surfaced as a warn-don't-block popup when adding a candidate whose
 // phone/email already exists elsewhere in the database (any requisition).
+// id/requisition_id/archived(_reason) are included so the recruiter can
+// reuse this exact record (revoke onto the new requisition) instead of
+// creating a second row — see "Use existing candidate" in CandidatesView.
 export interface CandidateDuplicateMatch {
+  id: string;
   candidate_code: string;
   name: string;
+  requisition_id: string;
   requisition_title: string | null;
   req_code: string | null;
   shortlisted_on: string;
@@ -603,6 +622,8 @@ export interface CandidateDuplicateMatch {
   rejection_reason: string | null;
   on_hold: boolean;
   on_hold_note: string | null;
+  archived: boolean;
+  archived_reason: CandidateArchivedReason | null;
 }
 
 export interface OrgSettings {

@@ -275,6 +275,24 @@ export async function PATCH(
       if (candidate.status === "rejected") {
         return NextResponse.json({ error: "Rejected candidates cannot be revoked." }, { status: 400 });
       }
+      // requisition_on_hold/candidate_on_hold_timeout candidates were just
+      // paused, not closed out — restore them exactly where they left off
+      // instead of treating this like a fresh reconsideration.
+      if (candidate.archived_reason === "requisition_on_hold" || candidate.archived_reason === "candidate_on_hold_timeout") {
+        update = {
+          archived: false,
+          archived_at: null,
+          archived_reason: null,
+          // Clear the hold itself, not just the archive flag it produced —
+          // otherwise on_hold_since is still 15+ days old and the next sweep
+          // (src/lib/archiving.ts) immediately re-archives them.
+          on_hold: false,
+          on_hold_note: null,
+          on_hold_since: null,
+          audit_log: appendAudit(candidate.audit_log, actor, "Revoked from archive", `Resumed in ${STAGE_LABELS[candidate.current_stage]} — was just on hold`),
+        };
+        break;
+      }
       const revokeRequisitionId = (body.requisition_id as string | undefined) || candidate.requisition_id;
       const movedToDifferentReq = revokeRequisitionId !== candidate.requisition_id;
       update = {

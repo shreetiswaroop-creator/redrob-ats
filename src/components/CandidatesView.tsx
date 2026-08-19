@@ -3,8 +3,10 @@
 import { useMemo, useState } from "react";
 import { Field, inputClass } from "./Modal";
 import {
+  Candidate,
   CandidateDuplicateMatch,
   CandidateSource,
+  CANDIDATE_ARCHIVED_REASON_LABELS,
   CANDIDATE_SOURCE_LABELS,
   CANDIDATE_SOURCE_ORDER,
   CustomFieldDefinition,
@@ -15,6 +17,7 @@ import {
 import { api } from "@/lib/api";
 import { useActor } from "@/lib/actor-context";
 import { CustomFieldsFields } from "./CustomFieldsFields";
+import { CandidateDetailPanel } from "./CandidateDetailPanel";
 
 function formatDupeDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", { dateStyle: "medium" });
@@ -22,6 +25,7 @@ function formatDupeDate(iso: string): string {
 
 function dupeStatusLine(m: CandidateDuplicateMatch): string {
   if (m.status === "rejected") return `Rejected${m.rejection_reason ? ` — ${m.rejection_reason}` : ""}`;
+  if (m.archived) return `Archived — ${m.archived_reason ? CANDIDATE_ARCHIVED_REASON_LABELS[m.archived_reason] : "unknown reason"}`;
   if (m.on_hold) return `On hold${m.on_hold_note ? ` — ${m.on_hold_note}` : ""}`;
   return `Active — ${STAGE_LABELS[m.stage]}`;
 }
@@ -66,6 +70,8 @@ export function CandidatesView({
   const [submitting, setSubmitting] = useState(false);
   const [duplicateMatches, setDuplicateMatches] = useState<CandidateDuplicateMatch[] | null>(null);
   const [confirmation, setConfirmation] = useState<string | null>(null);
+  const [reusingId, setReusingId] = useState<string | null>(null);
+  const [reuseTarget, setReuseTarget] = useState<{ candidate: Candidate; requisition: Requisition } | null>(null);
 
   function selectRequisition(id: string) {
     setRequisitionId(id);
@@ -188,6 +194,29 @@ export function CandidatesView({
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  // Reuses the matched (archived) record instead of creating a second row —
+  // same reason-aware revoke logic as the Archive page's picker flow
+  // (src/app/api/candidates/[id]/route.ts, case "revoke"): on-hold reasons
+  // restore to their own prior stage/requisition regardless of the id we
+  // pass here, expired/fulfilled reasons land on this requisition in
+  // Sourcing, matching "equivalent to picking this requisition in the
+  // position-picker flow."
+  async function handleUseExisting(match: CandidateDuplicateMatch) {
+    if (!requisition) return;
+    setReusingId(match.id);
+    setError(null);
+    try {
+      const updated = await api.revokeCandidate(match.id, requisition.id);
+      setReuseTarget({ candidate: updated, requisition });
+      setDuplicateMatches(null);
+      resetCandidateFields();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reuse the existing candidate.");
+    } finally {
+      setReusingId(null);
     }
   }
 
@@ -391,6 +420,24 @@ export function CandidatesView({
                       <span className="font-medium">{m.name}</span> ({m.candidate_code}) — shortlisted for{" "}
                       <span className="font-medium">{m.requisition_title ?? "an unknown requisition"}</span>
                       {m.req_code ? ` (${m.req_code})` : ""} on {formatDupeDate(m.shortlisted_on)}. {dupeStatusLine(m)}
+                      {m.archived ? (
+                        <div className="mt-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleUseExisting(m)}
+                            disabled={reusingId === m.id}
+                            className="rounded-md border border-emerald-400 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 dark:hover:bg-emerald-900"
+                          >
+                            {reusingId === m.id ? "Reassigning…" : "Use existing candidate for this requisition instead"}
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="mt-1.5 rounded-md bg-red-50 px-2 py-1 text-[11px] text-red-800 dark:bg-red-950 dark:text-red-300">
+                          This candidate's data already exists for an active requisition — a candidate can&apos;t be
+                          shortlisted for two requisitions at the same time. Resolve their existing candidacy first
+                          (advance, hold, or reject it) before reassigning them here.
+                        </p>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -426,6 +473,16 @@ export function CandidatesView({
           </form>
         )}
       </div>
+
+      {reuseTarget && (
+        <CandidateDetailPanel
+          candidate={reuseTarget.candidate}
+          requisition={reuseTarget.requisition}
+          customFieldDefinitions={customFieldDefinitions}
+          onClose={() => setReuseTarget(null)}
+          onUpdated={(updated) => setReuseTarget((prev) => (prev ? { ...prev, candidate: updated } : prev))}
+        />
+      )}
     </div>
   );
 }

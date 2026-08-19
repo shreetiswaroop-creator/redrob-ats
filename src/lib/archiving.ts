@@ -1,5 +1,5 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { Requisition } from "./types";
+import { Candidate, Requisition } from "./types";
 
 const ON_HOLD_ARCHIVE_MS = 15 * 24 * 60 * 60 * 1000;
 
@@ -22,6 +22,25 @@ export async function sweepOnHoldArchiving(supabase: SupabaseClient, requisition
       .from("candidates")
       .update({ archived: true, archived_at: archivedAt, archived_reason: "requisition_on_hold" })
       .eq("requisition_id", req.id)
+      .eq("archived", false);
+  }
+}
+
+// Mirrors sweepOnHoldArchiving at the individual candidate level — a
+// candidate can be put on hold on their own (set_on_hold), independent of
+// their requisition's status. Left on hold 15+ days, they archive with a
+// distinct reason so Revoke (candidates/[id] PATCH) knows to restore them
+// to their exact prior stage/requisition rather than offering a position
+// picker, same as requisition_on_hold candidates.
+export async function sweepCandidateOnHoldArchiving(supabase: SupabaseClient, candidates: Candidate[]): Promise<void> {
+  for (const c of candidates) {
+    if (!c.on_hold || c.archived || !c.on_hold_since) continue;
+    if (Date.now() - new Date(c.on_hold_since).getTime() < ON_HOLD_ARCHIVE_MS) continue;
+
+    await supabase
+      .from("candidates")
+      .update({ archived: true, archived_at: new Date().toISOString(), archived_reason: "candidate_on_hold_timeout" })
+      .eq("id", c.id)
       .eq("archived", false);
   }
 }

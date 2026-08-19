@@ -39,17 +39,21 @@ function candidateReasonNote(c: Candidate): string | null {
 export function ArchiveView({
   initialRequisitions,
   customFieldDefinitions,
+  initialStandaloneCandidates,
 }: {
   initialRequisitions: Requisition[];
   customFieldDefinitions: CustomFieldDefinition[];
+  initialStandaloneCandidates: (Candidate & { requisition: Requisition })[];
 }) {
   const [requisitions, setRequisitions] = useState(initialRequisitions);
   const [selectedId, setSelectedId] = useState<string | null>(initialRequisitions[0]?.id ?? null);
   const [candidatesByReq, setCandidatesByReq] = useState<Record<string, Candidate[]>>({});
+  const [standaloneCandidates, setStandaloneCandidates] = useState(initialStandaloneCandidates);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revokingReq, setRevokingReq] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<Candidate | null>(null);
+  const [resumingId, setResumingId] = useState<string | null>(null);
   const [reviewTarget, setReviewTarget] = useState<{ candidate: Candidate; requisition: Requisition } | null>(null);
 
   const selected = requisitions.find((r) => r.id === selectedId) ?? null;
@@ -101,8 +105,81 @@ export function ArchiveView({
         [selectedId]: (prev[selectedId] ?? []).map((c) => (c.id === updated.id ? updated : c)),
       }));
     }
+    setStandaloneCandidates((prev) => prev.filter((c) => c.id !== updated.id));
     setRevokeTarget(null);
     setReviewTarget({ candidate: updated, requisition });
+  }
+
+  // requisition_on_hold/candidate_on_hold_timeout candidates were just
+  // paused, not closed out — no position to pick, resume them directly.
+  async function handleResumeFromHold(c: Candidate, requisition: Requisition) {
+    setResumingId(c.id);
+    setError(null);
+    try {
+      const updated = await api.revokeCandidate(c.id);
+      handleRevoked(updated, requisition);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to revoke.");
+    } finally {
+      setResumingId(null);
+    }
+  }
+
+  function candidateRow(c: Candidate, requisition: Requisition) {
+    const reasonNote = candidateReasonNote(c);
+    const revocable = c.archived && c.status !== "rejected";
+    const wasJustOnHold = c.archived_reason === "requisition_on_hold" || c.archived_reason === "candidate_on_hold_timeout";
+    return (
+      <div key={c.id} className="rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-700">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-slate-900 dark:text-slate-100">{c.name}</span>
+            <span className="font-mono text-xs text-slate-400 dark:text-slate-500">{c.candidate_code}</span>
+            {c.priority && (
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${PRIORITY_BADGE[c.priority]}`}>
+                {c.priority}
+              </span>
+            )}
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+              {STAGE_LABELS[c.current_stage]}
+            </span>
+            {c.status === "rejected" && (
+              <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900 dark:text-red-300">
+                Rejected
+              </span>
+            )}
+            {c.consent_given ? (
+              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
+                ✓ Consent given
+              </span>
+            ) : (
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900 dark:text-amber-300">
+                ⚠ No consent on file
+              </span>
+            )}
+          </div>
+          {revocable && (
+            <button
+              onClick={() => (wasJustOnHold ? handleResumeFromHold(c, requisition) : setRevokeTarget(c))}
+              disabled={resumingId === c.id}
+              className="shrink-0 rounded-md border border-emerald-300 px-2 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-800 dark:text-emerald-400 dark:hover:bg-emerald-950"
+            >
+              {wasJustOnHold
+                ? resumingId === c.id
+                  ? "Resuming…"
+                  : "Revoke — resume where they left off"
+                : "Revoke — reconsider candidate"}
+            </button>
+          )}
+          {c.archived === false && c.archived_reason === null && (
+            <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
+              Revoked — back in active pipeline
+            </span>
+          )}
+        </div>
+        {reasonNote && <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{reasonNote}</p>}
+      </div>
+    );
   }
 
   return (
@@ -196,66 +273,32 @@ export function ArchiveView({
               )}
 
               {!loading && candidates && candidates.length > 0 && (
-                <div className="space-y-2">
-                  {candidates.map((c) => {
-                    const reasonNote = candidateReasonNote(c);
-                    const revocable = c.archived && c.status !== "rejected";
-                    return (
-                      <div
-                        key={c.id}
-                        className="rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-700"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium text-slate-900 dark:text-slate-100">{c.name}</span>
-                            <span className="font-mono text-xs text-slate-400 dark:text-slate-500">{c.candidate_code}</span>
-                            {c.priority && (
-                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${PRIORITY_BADGE[c.priority]}`}>
-                                {c.priority}
-                              </span>
-                            )}
-                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">
-                              {STAGE_LABELS[c.current_stage]}
-                            </span>
-                            {c.status === "rejected" && (
-                              <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900 dark:text-red-300">
-                                Rejected
-                              </span>
-                            )}
-                            {c.consent_given ? (
-                              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
-                                ✓ Consent given
-                              </span>
-                            ) : (
-                              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900 dark:text-amber-300">
-                                ⚠ No consent on file
-                              </span>
-                            )}
-                          </div>
-                          {revocable && (
-                            <button
-                              onClick={() => setRevokeTarget(c)}
-                              className="shrink-0 rounded-md border border-emerald-300 px-2 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-50 dark:border-emerald-800 dark:text-emerald-400 dark:hover:bg-emerald-950"
-                            >
-                              Revoke — reconsider candidate
-                            </button>
-                          )}
-                          {c.archived === false && c.archived_reason === null && (
-                            <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
-                              Revoked — back in active pipeline
-                            </span>
-                          )}
-                        </div>
-                        {reasonNote && <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{reasonNote}</p>}
-                      </div>
-                    );
-                  })}
-                </div>
+                <div className="space-y-2">{candidates.map((c) => candidateRow(c, selected))}</div>
               )}
             </>
           )}
         </div>
       </div>
+
+      {standaloneCandidates.length > 0 && (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/40 p-4 shadow-sm dark:border-amber-900 dark:bg-amber-950/20">
+          <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Individually On-Hold Candidates</h2>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Put on hold on their own for 15+ days and archived independently — their requisition is still open and
+            not shown in the list on the left.
+          </p>
+          <div className="mt-3 space-y-2">
+            {standaloneCandidates.map((c) => (
+              <div key={c.id}>
+                <p className="mb-1 text-xs text-slate-400 dark:text-slate-500">
+                  {c.requisition.title} <span className="font-mono">{c.requisition.req_code}</span>
+                </p>
+                {candidateRow(c, c.requisition)}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {revokeTarget && (
         <RevokeCandidateModal

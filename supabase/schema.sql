@@ -656,3 +656,36 @@ alter table users add column if not exists password_reset_expires_at timestamptz
 -- candidate record that still references them — a hard delete would turn
 -- all of that into a dangling/blank reference the moment someone left.
 alter table users add column if not exists deactivated_at timestamptz;
+
+-- Fires when a requisition's on-hold-timeout archive is revoked, cascading
+-- to every candidate who was auto-archived alongside it (see
+-- src/lib/archiving.ts's sweepOnHoldArchiving and the "revoke" action in
+-- src/app/api/requisitions/[id]/route.ts).
+insert into email_templates (template_key, label, subject_template, body_template) values
+  ('position_reopened', 'Position Reopened',
+   'Good news — {{requisition_title}} has reopened',
+   'Hi {{candidate_name}}, {{requisition_title}} ({{req_code}}) was temporarily on hold and has now reopened. Please confirm you''re still available to continue — our recruiter will be calling you shortly.')
+on conflict (template_key) do nothing;
+
+-- Mirrors requisitions' own 15-day on-hold auto-archive at the individual
+-- candidate level (sweepCandidateOnHoldArchiving in src/lib/archiving.ts) —
+-- a candidate can be put on hold on their own, independent of their
+-- requisition's status. 'candidate_on_hold_timeout' is a distinct reason
+-- from 'requisition_on_hold' so Revoke (candidates/[id] PATCH) can tell them
+-- apart from the requisition-fulfilled/expired "closed chapter" cases, even
+-- though both on-hold reasons are handled the same way by Revoke today.
+do $$
+declare
+  con record;
+begin
+  for con in
+    select conname from pg_constraint
+    where conrelid = 'candidates'::regclass
+      and contype = 'c'
+      and pg_get_constraintdef(oid) ilike '%archived_reason%'
+  loop
+    execute format('alter table candidates drop constraint %I', con.conname);
+  end loop;
+end $$;
+alter table candidates add constraint candidates_archived_reason_check
+  check (archived_reason in ('requisition_fulfilled', 'requisition_expired', 'requisition_on_hold', 'candidate_on_hold_timeout'));
