@@ -1,8 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { put, del, get } from "@vercel/blob";
 import { supabaseServer } from "@/lib/supabase";
 import { getSessionUser } from "@/lib/session";
 import { appendAudit } from "@/lib/audit";
+import { runFitScoring } from "@/lib/fitScoring";
 import { Candidate } from "@/lib/types";
 
 const MAX_BYTES = 10 * 1024 * 1024; // 10MB
@@ -50,12 +51,23 @@ export async function POST(
   const auditLog = appendAudit(candidate.audit_log, session.name, "Uploaded resume", file.name);
   const { data, error } = await supabase
     .from("candidates")
-    .update({ resume_pathname: blob.pathname, resume_filename: file.name, audit_log: auditLog })
+    .update({
+      resume_pathname: blob.pathname,
+      resume_filename: file.name,
+      audit_log: auditLog,
+      // Every successful save — first attach or a replacement — describes a
+      // new document, so the fit score (if any) is now describing a resume
+      // that no longer exists. Mark pending here so the response already
+      // reflects "scoring in progress"; the actual AI call runs after this
+      // request finishes, never blocking the upload itself.
+      fit_scoring_status: "pending",
+    })
     .eq("id", id)
     .select()
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  after(() => runFitScoring(id));
   return NextResponse.json(data);
 }
 
@@ -111,7 +123,19 @@ export async function DELETE(
   const auditLog = appendAudit(candidate.audit_log, session.name, "Removed resume", candidate.resume_filename ?? undefined);
   const { data, error } = await supabase
     .from("candidates")
-    .update({ resume_pathname: null, resume_filename: null, audit_log: auditLog })
+    .update({
+      resume_pathname: null,
+      resume_filename: null,
+      audit_log: auditLog,
+      // No resume left to score against — clear whatever fit data existed
+      // rather than leaving a stale score describing a document that's gone.
+      fit_scoring_status: "not_scored",
+      fit_score: null,
+      fit_rationale: null,
+      fit_matched_requirements: null,
+      fit_missing_requirements: null,
+      fit_scored_at: null,
+    })
     .eq("id", id)
     .select()
     .single();

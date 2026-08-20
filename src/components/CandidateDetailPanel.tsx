@@ -626,6 +626,8 @@ export function CandidateDetailPanel({
 
         <ResumeSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
 
+        <FitScoreSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
+
         <InterviewRoundsSection candidate={candidate} onSave={handleSaveInterviewRounds} />
 
         <FinalDetailsSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
@@ -838,6 +840,116 @@ function ResumeSection({
           <input type="file" accept=".pdf,.doc,.docx" className="hidden" disabled={uploading} onChange={handleFileChange} />
         </label>
       )}
+    </SectionCard>
+  );
+}
+
+const FIT_SCORE_ADVISORY = "AI-generated estimate to help triage — not a hiring decision.";
+
+function fitScoreBadgeClass(score: number): string {
+  if (score >= 75) return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300";
+  if (score >= 50) return "bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300";
+  return "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300";
+}
+
+// AI CV-to-JD fit score (src/lib/fitScoring.ts) — same Gemini integration as
+// Ask Redrob. Always advisory: shown identically to recruiters and HR
+// Management, never gates or auto-advances anyone. Re-scoring here always
+// awaits the real result (button loading state), unlike the automatic
+// triggers (resume upload, requisition reassignment) which fire in the
+// background and never block those actions.
+function FitScoreSection({ candidate, setCandidate }: { candidate: Candidate; setCandidate: (c: Candidate) => void }) {
+  const [rescoring, setRescoring] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleRescore() {
+    setError(null);
+    setRescoring(true);
+    try {
+      const updated = await api.rescoreCandidateFit(candidate.id);
+      setCandidate(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setRescoring(false);
+    }
+  }
+
+  return (
+    <SectionCard title="AI Fit Score">
+      <p className="mb-3 text-[11px] italic text-slate-400 dark:text-slate-500">{FIT_SCORE_ADVISORY}</p>
+      {error && <p className="mb-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+
+      {candidate.fit_scoring_status === "not_scored" && (
+        <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+          {candidate.fit_rationale ?? "Not scored yet — needs both a resume on file and a requisition with a JD to compare against."}
+        </p>
+      )}
+
+      {candidate.fit_scoring_status === "pending" && (
+        <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">Scoring in progress…</p>
+      )}
+
+      {candidate.fit_scoring_status === "failed" && (
+        <p className="mb-3 text-xs text-red-600 dark:text-red-400">
+          Scoring failed{candidate.fit_rationale ? ` — ${candidate.fit_rationale}` : ""}.
+        </p>
+      )}
+
+      {candidate.fit_scoring_status === "scored" && candidate.fit_score !== null && (
+        <div className="mb-3">
+          <div className="flex items-center gap-2">
+            <span className={`rounded-full px-3 py-1 text-sm font-semibold ${fitScoreBadgeClass(candidate.fit_score)}`}>
+              {candidate.fit_score}% match
+            </span>
+            {candidate.fit_scored_at && (
+              <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                as of {new Date(candidate.fit_scored_at).toLocaleString()}
+              </span>
+            )}
+          </div>
+          {candidate.fit_rationale && (
+            <p className="mt-2 text-xs text-slate-700 dark:text-slate-300">{candidate.fit_rationale}</p>
+          )}
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                Matched
+              </p>
+              {candidate.fit_matched_requirements && candidate.fit_matched_requirements.length > 0 ? (
+                <ul className="space-y-0.5 text-xs text-slate-600 dark:text-slate-400">
+                  {candidate.fit_matched_requirements.map((r, i) => (
+                    <li key={i}>✓ {r}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-slate-400 dark:text-slate-500">None</p>
+              )}
+            </div>
+            <div>
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">Missing</p>
+              {candidate.fit_missing_requirements && candidate.fit_missing_requirements.length > 0 ? (
+                <ul className="space-y-0.5 text-xs text-slate-600 dark:text-slate-400">
+                  {candidate.fit_missing_requirements.map((r, i) => (
+                    <li key={i}>✗ {r}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-slate-400 dark:text-slate-500">None</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={handleRescore}
+        disabled={rescoring}
+        className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
+      >
+        {rescoring ? "Scoring…" : candidate.fit_scoring_status === "failed" ? "Retry scoring" : "Re-score"}
+      </button>
     </SectionCard>
   );
 }

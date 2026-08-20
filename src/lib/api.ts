@@ -21,6 +21,16 @@ export const api = {
     }).then((r) => handle<Requisition>(r));
   },
 
+  uploadRequisitionJd(id: string, file: File) {
+    const formData = new FormData();
+    formData.append("file", file);
+    return fetch(`/api/requisitions/${id}/jd`, { method: "POST", body: formData }).then((r) => handle<Requisition>(r));
+  },
+
+  deleteRequisitionJd(id: string) {
+    return fetch(`/api/requisitions/${id}/jd`, { method: "DELETE" }).then((r) => handle<Requisition>(r));
+  },
+
   setRequisitionStatus(id: string, status: string, note?: string) {
     return fetch(`/api/requisitions/${id}`, {
       method: "PATCH",
@@ -414,6 +424,17 @@ export const api = {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "reassign_owner", new_owner_id: newOwnerId }),
+    }).then((r) => handle<Candidate>(r));
+  },
+
+  // Awaits the actual AI call — this request IS "run scoring now," so it's
+  // meant to be awaited by the caller (button loading state), unlike the
+  // automatic triggers which fire in the background.
+  rescoreCandidateFit(id: string) {
+    return fetch(`/api/candidates/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "rescore_fit" }),
     }).then((r) => handle<Candidate>(r));
   },
 };

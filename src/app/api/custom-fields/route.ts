@@ -6,7 +6,7 @@ import { slugifyFieldKey } from "@/lib/customFields";
 
 // GET is intentionally open to any signed-in user (not hr_management-only):
 // recruiters need these definitions to render the dynamic fields on the
-// Candidates page and NewRequisitionModal. Only creating/editing/deleting a
+// Candidates and Requisitions pages. Only creating/editing/deleting a
 // definition (below, and in [id]/route.ts) is hr_management-gated.
 export async function GET(req: NextRequest) {
   const session = await getSessionUser(req);

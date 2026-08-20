@@ -28,6 +28,16 @@ function PipelineIcon() {
   );
 }
 
+function RequisitionsIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="5" width="14" height="10" rx="1.5" />
+      <path d="M6.5 5V3.8a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V5" />
+      <path d="M2 9.5h14" />
+    </svg>
+  );
+}
+
 function UserPlusIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
@@ -169,6 +179,13 @@ export const NAV_ITEMS: {
     icon: ApprovalsIcon,
     roles: ["hr_management"],
     description: "Everything waiting on HR Management in one place — requisition approvals, reference exceptions, grace extensions, and offer document reviews.",
+  },
+  {
+    href: "/requisitions",
+    label: "Requisitions",
+    icon: RequisitionsIcon,
+    roles: null,
+    description: "Raise a new requisition, attach a JD, and see every requisition raised so far.",
   },
   {
     href: "/candidates",

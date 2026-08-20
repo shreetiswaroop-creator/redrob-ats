@@ -689,3 +689,28 @@ begin
 end $$;
 alter table candidates add constraint candidates_archived_reason_check
   check (archived_reason in ('requisition_fulfilled', 'requisition_expired', 'requisition_on_hold', 'candidate_on_hold_timeout'));
+
+-- AI-powered CV-to-JD fit scoring (src/lib/fitScoring.ts), using the same
+-- Gemini integration already powering Ask Redrob. fit_score/rationale/
+-- matched/missing are null until a score exists. fit_rationale doubles as
+-- the human-readable reason when fit_scoring_status is 'not_scored' (no JD
+-- to compare against) or 'failed' (the AI call itself errored) — not just
+-- the AI's explanation of a real score.
+alter table candidates add column if not exists fit_score int;
+alter table candidates add column if not exists fit_rationale text;
+alter table candidates add column if not exists fit_matched_requirements jsonb;
+alter table candidates add column if not exists fit_missing_requirements jsonb;
+alter table candidates add column if not exists fit_scored_at timestamptz;
+alter table candidates add column if not exists fit_scoring_status text
+  check (fit_scoring_status in ('not_scored', 'pending', 'scored', 'failed'));
+alter table candidates alter column fit_scoring_status set default 'not_scored';
+update candidates set fit_scoring_status = 'not_scored' where fit_scoring_status is null;
+alter table candidates alter column fit_scoring_status set not null;
+
+-- Requisitions moved off the Candidate Pipeline board onto their own page
+-- (src/app/requisitions/page.tsx) gained an optional formal JD document —
+-- same object-storage pattern as resume_pathname/resume_filename on
+-- candidates. This is additive to the free-text description/must_have_skills
+-- fields, not a replacement; src/lib/fitScoring.ts reads both.
+alter table requisitions add column if not exists jd_pathname text;
+alter table requisitions add column if not exists jd_filename text;

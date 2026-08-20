@@ -1,8 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { supabaseServer } from "@/lib/supabase";
 import { getSessionUser } from "@/lib/session";
 import { appendAudit } from "@/lib/audit";
 import { reassignCandidateOwner } from "@/lib/candidateOwnership";
+import { runFitScoring } from "@/lib/fitScoring";
 import { Candidate, CustomFieldDefinition, deriveNextRoundName, GraceExtension, OrgSettings, Requisition, STAGE_LABELS, STAGE_ORDER, Stage } from "@/lib/types";
 import { validateCustomFieldValues } from "@/lib/customFields";
 import { normalizeOfferSteps, pendingGraceExtension } from "@/lib/tat";
@@ -111,6 +112,12 @@ export async function PATCH(
 
   let update: Record<string, unknown> = {};
   const drafts: NotificationDraft[] = [];
+  // Set true only when requisition_id is actually changing (the picker path
+  // below) — the comparison basis for a fit score is the requisition's JD,
+  // so only a genuine requisition change invalidates it. Reassigning owner
+  // or restoring an on-hold candidate to their same requisition never touch
+  // requisition_id, so neither triggers a re-score.
+  let shouldRescoreFit = false;
 
   switch (body.action) {
     case "move_stage": {
@@ -295,6 +302,7 @@ export async function PATCH(
       }
       const revokeRequisitionId = (body.requisition_id as string | undefined) || candidate.requisition_id;
       const movedToDifferentReq = revokeRequisitionId !== candidate.requisition_id;
+      if (movedToDifferentReq && candidate.resume_pathname) shouldRescoreFit = true;
       update = {
         archived: false,
         archived_at: null,
@@ -305,6 +313,7 @@ export async function PATCH(
         requisition_id: revokeRequisitionId,
         current_stage: "sourcing",
         stage_entered_at: new Date().toISOString(),
+        ...(shouldRescoreFit ? { fit_scoring_status: "pending" } : {}),
         audit_log: appendAudit(
           candidate.audit_log,
           actor,
@@ -697,6 +706,16 @@ export async function PATCH(
       break;
     }
 
+    case "rescore_fit": {
+      // Manual re-score (individual button, or the "re-score all" loop on a
+      // requisition) is the one path that DOES await the AI call inline —
+      // the request itself is "run scoring now," so blocking just this
+      // button's own click (not any unrelated UI) is the point, unlike the
+      // automatic triggers above which must never block what triggered them.
+      const rescored = await runFitScoring(id);
+      return NextResponse.json(rescored);
+    }
+
     case "add_note": {
       const text = (body.text as string | undefined)?.trim();
       if (!text) {
@@ -753,6 +772,10 @@ export async function PATCH(
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   await insertNotifications(supabase, drafts, candidate.requisition_id, id, org);
+
+  // Runs after this response is sent — the reassignment itself is never
+  // blocked waiting on the AI call.
+  if (shouldRescoreFit) after(() => runFitScoring(id));
 
   return NextResponse.json(data);
 }

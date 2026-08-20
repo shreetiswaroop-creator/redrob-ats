@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import {
+  Candidate,
   CustomFieldDefinition,
   CustomFieldValues,
   Requisition,
@@ -15,6 +16,24 @@ import {
 import { useActor } from "@/lib/actor-context";
 import { computeClosureTatStatus } from "@/lib/tat";
 import { CustomFieldsFields } from "./CustomFieldsFields";
+
+// Deliberately client-driven rather than one long-running server route: a
+// requisition with 40+ candidates could exceed a serverless function's
+// duration comfortably, and this way "Re-scoring 12 of 40…" is real
+// progress, not a guess. Concurrency is capped so a big requisition doesn't
+// fire dozens of Gemini calls at once.
+const RESCORE_CONCURRENCY = 3;
+
+async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+  let index = 0;
+  async function next(): Promise<void> {
+    const i = index++;
+    if (i >= items.length) return;
+    await worker(items[i]);
+    return next();
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, next));
+}
 
 // Mirrors the server-side restrictedStatuses gate in
 // /api/requisitions/[id]/route.ts — UI hiding is cosmetic, the API check is
@@ -54,23 +73,48 @@ const URGENCY_BADGE: Record<RequisitionUrgency, string> = {
 
 export function RequisitionCardFace({
   requisition,
+  activeCandidates,
   onChangeStatus,
   onChangeClosureTat,
   onChangeDetails,
+  onRescoreCandidate,
   customFieldDefinitions,
 }: {
   requisition: Requisition;
+  activeCandidates: Candidate[];
   onChangeStatus: (status: RequisitionStatus, note?: string) => void;
   onChangeClosureTat: (days: number) => void;
   onChangeDetails: (fields: { urgency?: RequisitionUrgency; description?: string; custom_fields?: CustomFieldValues }) => void;
+  onRescoreCandidate: (id: string) => Promise<Candidate>;
   customFieldDefinitions: CustomFieldDefinition[];
 }) {
   const [note, setNote] = useState(requisition.status_note ?? "");
   const [closureTatDays, setClosureTatDays] = useState(requisition.closure_tat_days);
   const [description, setDescription] = useState(requisition.description ?? "");
+  const [rescoringAll, setRescoringAll] = useState(false);
+  const [rescoreProgress, setRescoreProgress] = useState<{ done: number; total: number } | null>(null);
   const { user } = useActor();
   const isHrManagement = user?.role === "hr_management";
   const closureTatStatus = computeClosureTatStatus(requisition);
+
+  async function handleRescoreAll() {
+    if (activeCandidates.length === 0) return;
+    setRescoringAll(true);
+    setRescoreProgress({ done: 0, total: activeCandidates.length });
+    await runWithConcurrency(activeCandidates, RESCORE_CONCURRENCY, async (c) => {
+      try {
+        await onRescoreCandidate(c.id);
+      } catch {
+        // Best-effort — one candidate failing (network hiccup, unreadable
+        // resume) shouldn't stop the rest of the batch; their own card ends
+        // up showing "Scoring failed — retry" for individual follow-up.
+      } finally {
+        setRescoreProgress((p) => (p ? { done: p.done + 1, total: p.total } : p));
+      }
+    });
+    setRescoringAll(false);
+    setRescoreProgress(null);
+  }
 
   return (
     <div className="mb-2 rounded-lg border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-700 dark:bg-slate-800">
@@ -171,6 +215,18 @@ export function RequisitionCardFace({
         values={requisition.custom_fields ?? {}}
         onChange={(next) => onChangeDetails({ custom_fields: next })}
       />
+
+      {activeCandidates.length > 0 && (
+        <button
+          type="button"
+          onClick={handleRescoreAll}
+          disabled={rescoringAll}
+          title="Re-scores every active candidate's AI fit score against this requisition's current JD"
+          className="mt-2 w-full rounded-md border border-slate-300 px-2 py-1 text-[10px] font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
+        >
+          {rescoreProgress ? `Re-scoring ${rescoreProgress.done} of ${rescoreProgress.total}…` : "Re-score all candidates"}
+        </button>
+      )}
     </div>
   );
 }

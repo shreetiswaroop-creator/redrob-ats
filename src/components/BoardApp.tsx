@@ -4,7 +4,6 @@ import { useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Candidate, CustomFieldDefinition, PendingEmailInfo, Requisition, RequisitionStatus, RequisitionUrgency, Stage } from "@/lib/types";
 import { KanbanBoard } from "./KanbanBoard";
-import { NewRequisitionModal } from "./NewRequisitionModal";
 import { CandidateDetailPanel } from "./CandidateDetailPanel";
 import { RejectModal } from "./RejectModal";
 import { OnHoldModal } from "./OnHoldModal";
@@ -34,7 +33,6 @@ export function BoardApp({
     const s = searchParams.get("status");
     return s === "raised" ? "raised" : null;
   });
-  const [showNewReq, setShowNewReq] = useState(false);
   // Set via the Approvals bell/page (?candidate=<id>) so a candidate-level
   // pending item (reference exception, grace extension, offer document
   // review) opens straight to that candidate's card — same query-param
@@ -187,6 +185,16 @@ export function BoardApp({
     }
   }
 
+  // Used by both the individual card and the requisition's "Re-score all"
+  // loop — the caller (RequisitionCardFace) awaits each result to drive its
+  // own progress counter, so failures must propagate rather than be
+  // swallowed here.
+  async function handleRescoreCandidate(id: string): Promise<Candidate> {
+    const updated = await api.rescoreCandidateFit(id);
+    upsertCandidate(updated);
+    return updated;
+  }
+
   const rejectDropCandidate = candidates.find((c) => c.id === rejectDropCandidateId);
   const onHoldCandidate = candidates.find((c) => c.id === onHoldCandidateId);
   const pendingMoveCandidate = pendingMove ? candidates.find((c) => c.id === pendingMove.candidateId) : undefined;
@@ -215,14 +223,6 @@ export function BoardApp({
             </option>
           ))}
         </select>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowNewReq(true)}
-            className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-400"
-          >
-            + New requisition
-          </button>
-        </div>
       </div>
 
       {error && (
@@ -249,16 +249,9 @@ export function BoardApp({
         onCancelPendingEmail={handleCancelPendingEmail}
         onSetOnHold={(id) => setOnHoldCandidateId(id)}
         onClearOnHold={handleClearOnHold}
+        onRescoreCandidate={handleRescoreCandidate}
         customFieldDefinitions={customFieldDefinitions}
       />
-
-      {showNewReq && (
-        <NewRequisitionModal
-          onClose={() => setShowNewReq(false)}
-          onCreated={(req) => setRequisitions((rs) => [req, ...rs])}
-          customFieldDefinitions={customFieldDefinitions.filter((d) => d.entity_type === "requisition")}
-        />
-      )}
 
       {openCandidate && (
         <CandidateDetailPanel

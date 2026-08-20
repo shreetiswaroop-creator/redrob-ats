@@ -24,6 +24,44 @@ const STEP_STATUS_CHIP: Record<string, string> = {
   na: "bg-slate-50 text-slate-300 line-through dark:bg-slate-800 dark:text-slate-600",
 };
 
+const FIT_SCORE_TOOLTIP = "AI-generated estimate to help triage — not a hiring decision.";
+
+function fitScoreBadgeClass(score: number): string {
+  if (score >= 75) return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300";
+  if (score >= 50) return "bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300";
+  return "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300";
+}
+
+function FitScoreBadge({ candidate }: { candidate: Candidate }) {
+  if (candidate.fit_scoring_status === "not_scored") return null;
+  if (candidate.fit_scoring_status === "pending") {
+    return (
+      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-700 dark:text-slate-400">
+        Scoring…
+      </span>
+    );
+  }
+  if (candidate.fit_scoring_status === "failed") {
+    return (
+      <span
+        className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-700 dark:text-slate-400"
+        title={candidate.fit_rationale ?? "AI fit scoring failed"}
+      >
+        Scoring failed
+      </span>
+    );
+  }
+  if (candidate.fit_score === null) return null;
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${fitScoreBadgeClass(candidate.fit_score)}`}
+      title={FIT_SCORE_TOOLTIP}
+    >
+      {candidate.fit_score}% match
+    </span>
+  );
+}
+
 const PRIORITY_BADGE: Record<string, string> = {
   P1: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
   P2: "bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300",
@@ -107,10 +145,11 @@ export function CandidateCardFace({
         <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
           {requisition ? `${requisition.title} · ${requisition.req_code}` : "—"}
         </div>
-        <div className="mt-1 flex items-center gap-1 text-[10px]">
+        <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
           <span className="rounded-full bg-slate-100 px-2 py-0.5 font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">
             {candidate.candidate_track === "experienced" ? "Experienced" : "Intern/Fresher"}
           </span>
+          <FitScoreBadge candidate={candidate} />
           {candidate.priority && (
             <span className={`rounded-full px-2 py-0.5 font-medium ${PRIORITY_BADGE[candidate.priority]}`}>{candidate.priority}</span>
           )}

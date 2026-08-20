@@ -158,6 +158,11 @@ export interface Requisition {
   on_hold_since: string | null;
 
   custom_fields: CustomFieldValues;
+
+  // Formal JD document, additive to description/must_have_skills — see
+  // src/app/api/requisitions/[id]/jd/route.ts and src/lib/fitScoring.ts.
+  jd_pathname: string | null;
+  jd_filename: string | null;
 }
 
 export interface InterviewRound {
@@ -572,7 +577,23 @@ export interface Candidate {
   custom_fields: CustomFieldValues;
 
   created_at: string;
+
+  fit_score: number | null;
+  // Doubles as the reason when fit_scoring_status is 'not_scored' (no JD to
+  // compare against) or 'failed' (the AI call errored) — not just the AI's
+  // explanation of a real score.
+  fit_rationale: string | null;
+  fit_matched_requirements: string[] | null;
+  fit_missing_requirements: string[] | null;
+  fit_scored_at: string | null;
+  fit_scoring_status: FitScoringStatus;
 }
+
+// AI-powered CV-to-JD fit score (src/lib/fitScoring.ts) — advisory only,
+// never gates or auto-advances a candidate. 'not_scored' covers both "no
+// resume yet" and "requisition has no JD to compare against"; 'pending' is
+// shown while the background/manual scoring call is in flight.
+export type FitScoringStatus = "not_scored" | "pending" | "scored" | "failed";
 
 // B2.1 — admin-configurable fields on Candidate/Requisition (see
 // custom_field_definitions in supabase/schema.sql). Values live in one JSONB

@@ -4,7 +4,7 @@ import { Field, inputClass } from "./Modal";
 import { CustomFieldDefinition, CustomFieldValues } from "@/lib/types";
 
 // Shared renderer for admin-defined custom fields — used both on the create
-// forms (CandidatesView, NewRequisitionModal) and the detail/edit views
+// forms (CandidatesView, RequisitionsView) and the detail/edit views
 // (CandidateDetailPanel, RequisitionCardFace). `onChange` always receives the
 // FULL updated values object (full-replace semantics, matching every other
 // jsonb column in this app and validateCustomFieldValues on the server) —

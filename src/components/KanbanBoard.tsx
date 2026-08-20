@@ -22,6 +22,7 @@ export function KanbanBoard({
   onCancelPendingEmail,
   onSetOnHold,
   onClearOnHold,
+  onRescoreCandidate,
   customFieldDefinitions,
 }: {
   requisitions: Requisition[];
@@ -41,6 +42,7 @@ export function KanbanBoard({
   onCancelPendingEmail: (candidateId: string, notificationId: string) => void;
   onSetOnHold: (id: string) => void;
   onClearOnHold: (id: string) => void;
+  onRescoreCandidate: (id: string) => Promise<Candidate>;
   customFieldDefinitions: CustomFieldDefinition[];
 }) {
   // Without a distance threshold, dnd-kit treats every pointerdown as a drag
@@ -104,9 +106,11 @@ export function KanbanBoard({
                   <RequisitionCardFace
                     key={r.id}
                     requisition={r}
+                    activeCandidates={activeCandidates.filter((c) => c.requisition_id === r.id)}
                     onChangeStatus={(status, note) => onChangeRequisitionStatus(r.id, status, note)}
                     onChangeClosureTat={(days) => onChangeClosureTat(r.id, days)}
                     onChangeDetails={(fields) => onChangeRequisitionDetails(r.id, fields)}
+                    onRescoreCandidate={onRescoreCandidate}
                     customFieldDefinitions={customFieldDefinitions.filter((d) => d.entity_type === "requisition")}
                   />
                 ))}
