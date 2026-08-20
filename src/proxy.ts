@@ -34,6 +34,29 @@ export async function proxy(req: NextRequest) {
     return res;
   }
 
+  // Hiring Manager gets a single dedicated review screen and nothing else —
+  // enforced structurally here rather than trusting every one of the 40+
+  // files that branch on session.role to individually get this right. Any
+  // other page redirects to their review screen; any other API route gets a
+  // flat 403. The two routes this role IS allowed to call (resume GET,
+  // candidates PATCH) still do their own ownership/action checks server-side
+  // — this middleware only decides which paths a request can reach at all.
+  if (session.role === "hiring_manager") {
+    const isAllowedApi =
+      pathname.startsWith("/api/hiring-manager/") ||
+      pathname === "/api/logout" ||
+      (/^\/api\/candidates\/[^/]+\/resume$/.test(pathname) && req.method === "GET") ||
+      (/^\/api\/candidates\/[^/]+$/.test(pathname) && req.method === "PATCH");
+
+    if (pathname.startsWith("/api/")) {
+      if (!isAllowedApi) {
+        return NextResponse.json({ error: "Not authorized." }, { status: 403 });
+      }
+    } else if (pathname !== "/hiring-manager") {
+      return NextResponse.redirect(new URL("/hiring-manager", req.url));
+    }
+  }
+
   return NextResponse.next();
 }
 

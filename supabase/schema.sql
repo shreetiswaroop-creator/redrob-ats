@@ -714,3 +714,23 @@ alter table candidates alter column fit_scoring_status set not null;
 -- fields, not a replacement; src/lib/fitScoring.ts reads both.
 alter table requisitions add column if not exists jd_pathname text;
 alter table requisitions add column if not exists jd_filename text;
+
+-- Third login role — Hiring Manager. Scoped by matching requisitions.
+-- hiring_manager_email to the account's own email (no new assignment
+-- table/model); see src/app/api/hiring-manager/candidates/route.ts and
+-- src/proxy.ts for how this role is actually confined.
+do $$
+declare
+  con record;
+begin
+  for con in
+    select conname from pg_constraint
+    where conrelid = 'users'::regclass
+      and contype = 'c'
+      and pg_get_constraintdef(oid) ilike '%role%'
+  loop
+    execute format('alter table users drop constraint %I', con.conname);
+  end loop;
+end $$;
+alter table users add constraint users_role_check
+  check (role in ('recruiter', 'hr_management', 'hiring_manager'));

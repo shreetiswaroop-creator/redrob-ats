@@ -14,12 +14,29 @@ function hasAllowedExtension(filename: string): boolean {
   return ALLOWED_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
+// Hiring Manager may only ever GET a resume, and only for a candidate on a
+// requisition they're the assigned hiring_manager_email for — this route had
+// no ownership check at all before this role existed, which was fine when
+// every signed-in user shared full visibility, but would let this new,
+// deliberately-scoped role fetch any candidate's resume by id otherwise.
+async function isResumeVisibleToHiringManager(
+  supabase: ReturnType<typeof supabaseServer>,
+  requisitionId: string,
+  callerEmail: string
+): Promise<boolean> {
+  const { data } = await supabase.from("requisitions").select("hiring_manager_email").eq("id", requisitionId).maybeSingle();
+  return !!data?.hiring_manager_email && data.hiring_manager_email.toLowerCase() === callerEmail.toLowerCase();
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const session = await getSessionUser(req);
   if (!session) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  if (session.role === "hiring_manager") {
+    return NextResponse.json({ error: "Not authorized to upload a resume." }, { status: 403 });
+  }
 
   const { id } = await params;
   const supabase = supabaseServer();
@@ -84,6 +101,10 @@ export async function GET(
   if (fetchError || !existing) return NextResponse.json({ error: "Candidate not found." }, { status: 404 });
   const candidate = existing as Candidate;
 
+  if (session.role === "hiring_manager" && !(await isResumeVisibleToHiringManager(supabase, candidate.requisition_id, session.email))) {
+    return NextResponse.json({ error: "Not authorized for this candidate's resume." }, { status: 403 });
+  }
+
   if (!candidate.resume_pathname) {
     return NextResponse.json({ error: "No resume on file for this candidate." }, { status: 404 });
   }
@@ -107,6 +128,9 @@ export async function DELETE(
 ) {
   const session = await getSessionUser(req);
   if (!session) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  if (session.role === "hiring_manager") {
+    return NextResponse.json({ error: "Not authorized to remove a resume." }, { status: 403 });
+  }
 
   const { id } = await params;
   const supabase = supabaseServer();

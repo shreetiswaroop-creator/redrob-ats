@@ -110,6 +110,31 @@ export async function PATCH(
   const requisition = requisitionRow as Requisition;
   const org: OrgSettings = (orgSettingsRow as OrgSettings) ?? EMPTY_ORG_SETTINGS;
 
+  // Additive-only: this is the ONLY role check on this shared, otherwise-
+  // unrestricted endpoint. It narrows what a hiring_manager session can do
+  // here; it must never change what recruiter/hr_management can already do.
+  // proxy.ts already keeps this role from reaching any action but reject/
+  // move_stage at the path level, but that's a defense-in-depth backstop —
+  // this is the real check, since proxy.ts can't see body.action or verify
+  // requisition ownership against the database.
+  if (session.role === "hiring_manager") {
+    const ownsThisRequisition =
+      !!requisition?.hiring_manager_email && requisition.hiring_manager_email.toLowerCase() === session.email.toLowerCase();
+    if (!ownsThisRequisition) {
+      return NextResponse.json({ error: "Not authorized for this candidate." }, { status: 403 });
+    }
+    if (body.action === "move_stage") {
+      if (candidate.current_stage !== "screening" || body.to_stage !== "interview") {
+        return NextResponse.json(
+          { error: "Hiring Managers can only pass a candidate from Screening to Interview Round(s)." },
+          { status: 403 }
+        );
+      }
+    } else if (body.action !== "reject") {
+      return NextResponse.json({ error: "Not authorized for this action." }, { status: 403 });
+    }
+  }
+
   let update: Record<string, unknown> = {};
   const drafts: NotificationDraft[] = [];
   // Set true only when requisition_id is actually changing (the picker path

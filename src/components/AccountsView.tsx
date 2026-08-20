@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AppUser, UserRole } from "@/lib/types";
+import { AppUser, USER_ROLE_LABELS, UserRole } from "@/lib/types";
 import { Field, inputClass, Modal } from "./Modal";
 
 interface OwnedCandidatePreview {
@@ -370,6 +370,7 @@ export function AccountsView({
             <select className={inputClass} value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
               <option value="recruiter">Recruiter</option>
               <option value="hr_management">HR Management</option>
+              <option value="hiring_manager">Hiring Manager</option>
             </select>
           </Field>
           <button
@@ -404,7 +405,7 @@ export function AccountsView({
                 <td className="px-3 py-2">{u.email}</td>
                 <td className="px-3 py-2">
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">
-                    {u.role === "hr_management" ? "HR Management" : "Recruiter"}
+                    {USER_ROLE_LABELS[u.role]}
                   </span>
                 </td>
                 <td className="px-3 py-2 text-xs text-slate-400 dark:text-slate-500">
@@ -453,7 +454,7 @@ export function AccountsView({
                     <td className="px-3 py-2">{u.email}</td>
                     <td className="px-3 py-2">
                       <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-700 dark:text-slate-400">
-                        {u.role === "hr_management" ? "HR Management" : "Recruiter"}
+                        {USER_ROLE_LABELS[u.role]}
                       </span>
                     </td>
                     <td className="px-3 py-2 text-xs">{new Date(u.deactivated_at as string).toLocaleDateString()}</td>

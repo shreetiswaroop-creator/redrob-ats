@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useActor } from "@/lib/actor-context";
+import { USER_ROLE_LABELS } from "@/lib/types";
 import { ChangePasswordModal } from "./ChangePasswordModal";
 import { REPLAY_TOUR_EVENT } from "./OnboardingTour";
 
@@ -47,7 +48,7 @@ export function ActorBar() {
       <div className="truncate text-slate-700 dark:text-slate-300">
         {user?.name}
         <div className="text-slate-400 dark:text-slate-500">
-          {user?.role === "hr_management" ? "HR Management" : "Recruiter"}
+          {user?.role ? USER_ROLE_LABELS[user.role] : ""}
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

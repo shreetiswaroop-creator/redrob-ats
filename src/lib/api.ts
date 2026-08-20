@@ -1,4 +1,4 @@
-import { AppUser, Candidate, CandidateDuplicateMatch, Client, CustomFieldDefinition, CustomFieldEntityType, DocumentTemplate, EmailTemplate, Interview, InterviewMode, Panelist, PendingEmailInfo, Requisition } from "./types";
+import { AppUser, Candidate, CandidateDuplicateMatch, Client, CustomFieldDefinition, CustomFieldEntityType, DocumentTemplate, EmailTemplate, HiringManagerCandidate, Interview, InterviewMode, Panelist, PendingEmailInfo, Requisition } from "./types";
 import { PendingApprovalItem } from "./pendingApprovals";
 
 async function handle<T>(res: Response): Promise<T> {
@@ -417,6 +417,10 @@ export const api = {
 
   listActiveUsers() {
     return fetch("/api/users").then((r) => handle<AppUser[]>(r)).then((users) => users.filter((u) => !u.deactivated_at));
+  },
+
+  listHiringManagerCandidates() {
+    return fetch("/api/hiring-manager/candidates").then((r) => handle<HiringManagerCandidate[]>(r));
   },
 
   reassignCandidateOwner(id: string, newOwnerId: string) {

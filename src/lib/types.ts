@@ -69,7 +69,12 @@ export type Stage =
 export type TatStatus = "on_track" | "at_risk" | "breached";
 export type CandidateStatus = "active" | "rejected";
 
-export type UserRole = "recruiter" | "hr_management";
+export type UserRole = "recruiter" | "hr_management" | "hiring_manager";
+export const USER_ROLE_LABELS: Record<UserRole, string> = {
+  recruiter: "Recruiter",
+  hr_management: "HR Management",
+  hiring_manager: "Hiring Manager",
+};
 
 export interface AppUser {
   id: string;
@@ -623,6 +628,26 @@ export interface CustomFieldDefinition {
   display_order: number;
   created_by: string;
   created_at: string;
+}
+
+// The exact (and only) shape a hiring_manager session can ever see — mirrors
+// the query-level whitelist in src/app/api/hiring-manager/candidates/route.ts
+// field-for-field. Deliberately NOT `Partial<Candidate>` or any subset
+// derived from it — a shared base type would make it too easy for a future
+// edit to widen this by accident.
+export interface HiringManagerCandidate {
+  id: string;
+  candidate_code: string;
+  name: string;
+  requisition_id: string;
+  current_stage: Stage;
+  resume_filename: string | null;
+  relevant_experience_years: number | null;
+  portfolio_url: string | null;
+  linkedin_url: string | null;
+  reason_for_change: string | null;
+  candidate_notes: CandidateNote[];
+  requisition: { title: string; req_code: string; hiring_manager_email: string | null };
 }
 
 // Surfaced as a warn-don't-block popup when adding a candidate whose

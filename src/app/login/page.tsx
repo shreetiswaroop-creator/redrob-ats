@@ -30,13 +30,21 @@ function LoginForm() {
 
     setLoading(false);
 
+    const body = await res.json().catch(() => ({}));
+
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
       setError(body.error ?? "Something went wrong.");
       return;
     }
 
-    router.push(searchParams.get("next") ?? "/");
+    // Hiring Manager has no access to "/" (the Dashboard) or anything else
+    // in the normal app shell — always lands on their own review screen,
+    // regardless of what "next" was carrying.
+    if (body.user?.role === "hiring_manager") {
+      router.push("/hiring-manager");
+    } else {
+      router.push(searchParams.get("next") ?? "/");
+    }
     router.refresh();
   }
 

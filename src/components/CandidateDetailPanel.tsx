@@ -653,7 +653,11 @@ export function CandidateDetailPanel({
 
         <HrmsHandoverSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
 
-        <TimelineSection candidate={candidate} setCandidate={(c) => { setCandidate(c); onUpdated(c); }} />
+        <TimelineSection
+          candidate={candidate}
+          setCandidate={(c) => { setCandidate(c); onUpdated(c); }}
+          hasHiringManager={!!requisition?.hiring_manager_email}
+        />
 
         <SectionCard title="Activity / audit log" collapsible defaultOpen={false}>
           <ul className="space-y-1 text-xs text-slate-600 dark:text-slate-400">
@@ -1929,9 +1933,11 @@ function buildTimeline(candidate: Candidate): TimelineEntry[] {
 function TimelineSection({
   candidate,
   setCandidate,
+  hasHiringManager,
 }: {
   candidate: Candidate;
   setCandidate: (c: Candidate) => void;
+  hasHiringManager: boolean;
 }) {
   const [noteText, setNoteText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -1957,6 +1963,11 @@ function TimelineSection({
   return (
     <SectionCard title="Activity timeline">
       <div className="mb-3">
+        {hasHiringManager && (
+          <p className="mb-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+            This note will be visible to the Hiring Manager reviewing this candidate.
+          </p>
+        )}
         <textarea
           className={`${inputClass} min-h-[60px]`}
           placeholder="Add a note…"

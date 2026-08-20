@@ -30,8 +30,8 @@ export async function POST(req: NextRequest) {
   if (!name || !email || !password || !role) {
     return NextResponse.json({ error: "Name, email, password, and role are required." }, { status: 400 });
   }
-  if (role !== "recruiter" && role !== "hr_management") {
-    return NextResponse.json({ error: "Role must be 'recruiter' or 'hr_management'." }, { status: 400 });
+  if (role !== "recruiter" && role !== "hr_management" && role !== "hiring_manager") {
+    return NextResponse.json({ error: "Role must be 'recruiter', 'hr_management', or 'hiring_manager'." }, { status: 400 });
   }
   if (password.length < 8) {
     return NextResponse.json({ error: "Password must be at least 8 characters." }, { status: 400 });
