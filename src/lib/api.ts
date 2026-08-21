@@ -47,7 +47,25 @@ export const api = {
     }).then((r) => handle<Requisition>(r));
   },
 
-  updateRequisitionDetails(id: string, fields: { urgency?: string; description?: string; custom_fields?: Record<string, unknown> }) {
+  updateRequisitionDetails(
+    id: string,
+    fields: {
+      title?: string;
+      client_id?: string;
+      urgency?: string;
+      description?: string;
+      department?: string;
+      level?: string;
+      location?: string;
+      headcount?: number;
+      budget_band?: string;
+      position_type?: string;
+      hiring_manager?: string;
+      hiring_manager_email?: string;
+      must_have_skills?: string;
+      custom_fields?: Record<string, unknown>;
+    }
+  ) {
     return fetch(`/api/requisitions/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },

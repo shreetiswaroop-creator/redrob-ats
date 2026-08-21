@@ -121,6 +121,12 @@ export async function PATCH(
   }
 
   if (body.action === "update_details") {
+    // No status-based lock, deliberately — a requisition being Approved (or
+    // any other status) never freezes it against edits. This action started
+    // as a narrow urgency/description/custom_fields patch (edited straight
+    // from the Kanban card) and is widened here to the full field set,
+    // reachable from the Requisitions page's edit form — same action,
+    // whichever caller sends fewer or more fields.
     const update: Record<string, unknown> = {};
     if ("urgency" in body) {
       if (!REQUISITION_URGENCY_ORDER.includes(body.urgency)) {
@@ -130,6 +136,62 @@ export async function PATCH(
     }
     if ("description" in body) {
       update.description = typeof body.description === "string" ? body.description.trim() || null : null;
+    }
+    if ("title" in body) {
+      if (typeof body.title !== "string" || !body.title.trim()) {
+        return NextResponse.json({ error: "Role title is required." }, { status: 400 });
+      }
+      update.title = body.title.trim();
+    }
+    if ("client_id" in body) {
+      if (typeof body.client_id !== "string" || !body.client_id) {
+        return NextResponse.json({ error: "Client is required." }, { status: 400 });
+      }
+      update.client_id = body.client_id;
+    }
+    if ("hiring_manager" in body) {
+      if (typeof body.hiring_manager !== "string" || !body.hiring_manager.trim()) {
+        return NextResponse.json({ error: "Hiring Manager is required." }, { status: 400 });
+      }
+      update.hiring_manager = body.hiring_manager.trim();
+    }
+    if ("hiring_manager_email" in body) {
+      // This field drives real access control (the hiring_manager role's
+      // entire visibility is scoped by matching it) — changing who it points
+      // at is an HR Management action, not a plain field edit anyone raising
+      // requisitions can make.
+      if (session.role !== "hr_management") {
+        return NextResponse.json({ error: "Only HR Management can change the assigned Hiring Manager's email." }, { status: 403 });
+      }
+      update.hiring_manager_email = typeof body.hiring_manager_email === "string" ? body.hiring_manager_email.trim() || null : null;
+    }
+    if ("position_type" in body) {
+      if (body.position_type !== "experienced" && body.position_type !== "fresher_intern") {
+        return NextResponse.json({ error: "Invalid position type." }, { status: 400 });
+      }
+      update.position_type = body.position_type;
+    }
+    if ("headcount" in body) {
+      const headcount = Number(body.headcount);
+      if (!Number.isFinite(headcount) || headcount <= 0) {
+        return NextResponse.json({ error: "Headcount must be a positive number." }, { status: 400 });
+      }
+      update.headcount = Math.round(headcount);
+    }
+    if ("department" in body) {
+      update.department = typeof body.department === "string" ? body.department.trim() || null : null;
+    }
+    if ("level" in body) {
+      update.level = typeof body.level === "string" ? body.level.trim() || null : null;
+    }
+    if ("location" in body) {
+      update.location = typeof body.location === "string" ? body.location.trim() || null : null;
+    }
+    if ("budget_band" in body) {
+      update.budget_band = typeof body.budget_band === "string" ? body.budget_band.trim() || null : null;
+    }
+    if ("must_have_skills" in body) {
+      update.must_have_skills = typeof body.must_have_skills === "string" ? body.must_have_skills.trim() || null : null;
     }
     if ("custom_fields" in body) {
       const { data: fieldDefs } = await supabase

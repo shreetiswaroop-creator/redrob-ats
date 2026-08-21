@@ -16,6 +16,7 @@ import {
 import { api } from "@/lib/api";
 import { useActor } from "@/lib/actor-context";
 import { CustomFieldsFields } from "./CustomFieldsFields";
+import { RequisitionEditModal } from "./RequisitionEditModal";
 
 const STATUS_BADGE: Record<RequisitionStatus, string> = {
   raised: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300",
@@ -79,6 +80,7 @@ export function RequisitionsView({
   const [submitting, setSubmitting] = useState(false);
   const [skipApproval, setSkipApproval] = useState(false);
   const [customFieldValues, setCustomFieldValues] = useState<CustomFieldValues>({});
+  const [editingRequisition, setEditingRequisition] = useState<Requisition | null>(null);
   const { user } = useActor();
   const isHrManagement = user?.role === "hr_management";
 
@@ -362,25 +364,42 @@ export function RequisitionsView({
           ) : (
             <ul className="divide-y divide-slate-100 dark:divide-slate-700">
               {requisitions.map((r) => (
-                <li key={r.id} className="flex items-center justify-between gap-3 bg-white px-4 py-2.5 dark:bg-slate-800">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{r.title}</span>
-                      <span className="shrink-0 font-mono text-[10px] text-slate-400 dark:text-slate-500">{r.req_code}</span>
+                <li key={r.id}>
+                  <button
+                    type="button"
+                    onClick={() => setEditingRequisition(r)}
+                    className="flex w-full items-center justify-between gap-3 bg-white px-4 py-2.5 text-left hover:bg-slate-50 dark:bg-slate-800 dark:hover:bg-slate-700"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{r.title}</span>
+                        <span className="shrink-0 font-mono text-[10px] text-slate-400 dark:text-slate-500">{r.req_code}</span>
+                      </div>
+                      <p className="truncate text-xs text-slate-500 dark:text-slate-400">
+                        {[r.client?.name, r.department, r.location].filter(Boolean).join(" · ") || "—"}
+                      </p>
                     </div>
-                    <p className="truncate text-xs text-slate-500 dark:text-slate-400">
-                      {[r.client?.name, r.department, r.location].filter(Boolean).join(" · ") || "—"}
-                    </p>
-                  </div>
-                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_BADGE[r.status]}`}>
-                    {REQUISITION_STATUS_LABELS[r.status]}
-                  </span>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_BADGE[r.status]}`}>
+                      {REQUISITION_STATUS_LABELS[r.status]}
+                    </span>
+                  </button>
                 </li>
               ))}
             </ul>
           )}
         </div>
       </div>
+
+      {editingRequisition && (
+        <RequisitionEditModal
+          requisition={editingRequisition}
+          clients={clients}
+          customFieldDefinitions={customFieldDefinitions}
+          isHrManagement={isHrManagement}
+          onClose={() => setEditingRequisition(null)}
+          onUpdated={(updated) => setRequisitions((rs) => rs.map((r) => (r.id === updated.id ? updated : r)))}
+        />
+      )}
     </div>
   );
 }
