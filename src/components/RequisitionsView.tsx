@@ -185,7 +185,8 @@ export function RequisitionsView({
         </div>
       )}
 
-      <div className="max-w-3xl rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+      <div className="flex items-start gap-6">
+      <div className="max-w-3xl flex-1 rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
         <form onSubmit={handleSubmit}>
           <Field label="Client *">
             <select className={inputClass} value={clientId} onChange={(e) => setClientId(e.target.value)}>
@@ -354,11 +355,11 @@ export function RequisitionsView({
         </form>
       </div>
 
-      <div className="mt-6 max-w-3xl">
+      <div className="sticky top-4 w-96 shrink-0">
         <h2 className="mb-2 text-sm font-semibold text-slate-800 dark:text-slate-200">
           All requisitions <span className="font-normal text-slate-400 dark:text-slate-500">({requisitions.length})</span>
         </h2>
-        <div className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700">
+        <div className="max-h-[calc(100vh-8rem)] overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700">
           {requisitions.length === 0 ? (
             <p className="p-4 text-xs text-slate-400 dark:text-slate-500">No requisitions raised yet.</p>
           ) : (
@@ -388,6 +389,7 @@ export function RequisitionsView({
             </ul>
           )}
         </div>
+      </div>
       </div>
 
       {editingRequisition && (
