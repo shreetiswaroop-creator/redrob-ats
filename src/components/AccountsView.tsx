@@ -213,8 +213,20 @@ export function AccountsView({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<UserRole>("recruiter");
+  const [addMode, setAddMode] = useState<"password" | "invite">("password");
+  const [liveSendingEnabled, setLiveSendingEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [addedMessage, setAddedMessage] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // AccountsView only ever renders for hr_management (page + API both gate
+  // on it), so this read is safe without a second role check here.
+  useEffect(() => {
+    fetch("/api/org-settings")
+      .then((r) => r.json())
+      .then((data) => setLiveSendingEnabled(!!data.live_sending_enabled))
+      .catch(() => {});
+  }, []);
 
   const [demoCount, setDemoCount] = useState(initialDemoCount);
   const [demoBusy, setDemoBusy] = useState(false);
@@ -261,16 +273,24 @@ export function AccountsView({
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setAddedMessage(null);
     setSubmitting(true);
     try {
       const res = await fetch("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password, role }),
+        body: JSON.stringify(addMode === "invite" ? { name, email, role, invite: true } : { name, email, role, password }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Something went wrong.");
       setUsers((u) => [...u, body]);
+      if (addMode === "invite") {
+        setAddedMessage(
+          body.invite_sent
+            ? `Invite sent to ${body.email} — they'll set their own password.`
+            : `Account created, but the invite email failed to send. They can request a reset themselves from the login page's "Forgot password?" link, or switch to sharing a temporary password directly.`
+        );
+      }
       setName("");
       setEmail("");
       setPassword("");
@@ -349,6 +369,35 @@ export function AccountsView({
 
       <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
         <h2 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-200">Add an account</h2>
+
+        {addedMessage && (
+          <div className="mb-3 rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-950 dark:text-green-300">
+            {addedMessage}
+          </div>
+        )}
+
+        <div className="mb-3 flex flex-wrap gap-4 text-sm text-slate-700 dark:text-slate-300">
+          <label className="flex items-center gap-1.5">
+            <input type="radio" checked={addMode === "password"} onChange={() => setAddMode("password")} />
+            Set a temporary password
+          </label>
+          <label className={`flex items-center gap-1.5 ${liveSendingEnabled ? "" : "opacity-50"}`}>
+            <input
+              type="radio"
+              checked={addMode === "invite"}
+              onChange={() => setAddMode("invite")}
+              disabled={!liveSendingEnabled}
+            />
+            Send email invite
+          </label>
+        </div>
+        {!liveSendingEnabled && (
+          <p className="mb-3 text-[11px] text-slate-400 dark:text-slate-500">
+            Turn on &ldquo;Actually send emails &amp; calendar invites&rdquo; under Settings → Org Contacts to enable
+            email invites.
+          </p>
+        )}
+
         <form onSubmit={handleAdd} className="grid grid-cols-2 gap-3">
           <Field label="Name">
             <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} required />
@@ -356,16 +405,18 @@ export function AccountsView({
           <Field label="Work email">
             <input type="email" className={inputClass} value={email} onChange={(e) => setEmail(e.target.value)} required />
           </Field>
-          <Field label="Temporary password (8+ characters)">
-            <input
-              type="text"
-              className={inputClass}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              minLength={8}
-            />
-          </Field>
+          {addMode === "password" && (
+            <Field label="Temporary password (8+ characters)">
+              <input
+                type="text"
+                className={inputClass}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+            </Field>
+          )}
           <Field label="Role">
             <select className={inputClass} value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
               <option value="recruiter">Recruiter</option>
@@ -378,12 +429,13 @@ export function AccountsView({
             disabled={submitting}
             className="col-span-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 dark:bg-indigo-500 dark:hover:bg-indigo-400"
           >
-            {submitting ? "Adding…" : "Add account"}
+            {submitting ? "Adding…" : addMode === "invite" ? "Add account & send invite" : "Add account"}
           </button>
         </form>
         <p className="mt-2 text-[11px] text-slate-400 dark:text-slate-500">
-          Share the temporary password with them directly — there's no email invite yet. They can change it after
-          logging in.
+          {addMode === "invite"
+            ? "They'll get an email with a link to set their own password — nothing to share with them directly."
+            : "Share the temporary password with them directly. They can change it after logging in."}
         </p>
       </div>
 
